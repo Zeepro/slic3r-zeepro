@@ -2,13 +2,15 @@
 
 %{
 #include <myinit.h>
+#include "BoundingBox.hpp"
+#include "ClipperUtils.hpp"
 #include "Polyline.hpp"
 %}
 
 %name{Slic3r::Polyline} class Polyline {
     ~Polyline();
-    Polyline* clone()
-        %code{% const char* CLASS = "Slic3r::Polyline"; RETVAL = new Polyline(*THIS); %};
+    Clone<Polyline> clone()
+        %code{% RETVAL = THIS; %};
     SV* arrayref()
         %code{% RETVAL = THIS->to_AV(); %};
     SV* pp()
@@ -19,15 +21,19 @@
         %code{% THIS->points.pop_back(); %};
     void reverse();
     Lines lines();
-    Point* first_point()
-        %code{% const char* CLASS = "Slic3r::Point"; RETVAL = THIS->first_point(); %};
-    Point* last_point()
-        %code{% const char* CLASS = "Slic3r::Point"; RETVAL = THIS->last_point(); %};
-    Points equally_spaced_points(double distance);
+    Clone<Point> first_point();
+    Clone<Point> last_point();
+    Points equally_spaced_points(double distance)
+        %code{% THIS->equally_spaced_points(distance, &RETVAL); %};
     double length();
     bool is_valid();
     void clip_end(double distance);
     void clip_start(double distance);
+    void extend_end(double distance);
+    void extend_start(double distance);
+    void simplify(double tolerance);
+    void split_at(Point* point, Polyline* p1, Polyline* p2)
+        %code{% THIS->split_at(*point, p1, p2); %};
 %{
 
 Polyline*
@@ -66,7 +72,20 @@ Polyline::rotate(angle, center_sv)
     CODE:
         Point center;
         center.from_SV_check(center_sv);
-        THIS->rotate(angle, &center);
+        THIS->rotate(angle, center);
+
+Polygons
+Polyline::grow(delta, scale = CLIPPER_OFFSET_SCALE, joinType = ClipperLib::jtSquare, miterLimit = 3)
+    const float             delta
+    double                  scale
+    ClipperLib::JoinType    joinType
+    double                  miterLimit
+    CODE:
+        Polylines polylines;
+        polylines.push_back(*THIS);
+        offset(polylines, RETVAL, delta, scale, joinType, miterLimit);
+    OUTPUT:
+        RETVAL
 
 %}
 };

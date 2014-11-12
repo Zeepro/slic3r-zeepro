@@ -77,7 +77,7 @@ stl_verify_neighbors(stl_file *stl)
 }
 
 void
-stl_translate(stl_file *stl, float x, float y, float z)
+stl_translate_relative(stl_file *stl, float x, float y, float z)
 {
   int i;
   int j;
@@ -102,7 +102,7 @@ stl_translate(stl_file *stl, float x, float y, float z)
 }
 
 void
-stl_scale(stl_file *stl, float versor[3])
+stl_scale_versor(stl_file *stl, float versor[3])
 {
   int i;
   int j;
@@ -145,7 +145,7 @@ stl_scale(stl_file *stl, float factor)
     versor[0] = factor;
     versor[1] = factor;
     versor[2] = factor;
-    stl_scale(stl, versor);
+    stl_scale_versor(stl, versor);
 }
 
 static void calculate_normals(stl_file *stl)
@@ -236,6 +236,8 @@ stl_rotate(float *x, float *y, float angle)
 extern void
 stl_get_size(stl_file *stl)
 {
+    if (stl->stats.number_of_facets == 0) return;
+    
   int i;
   int j;
 
@@ -376,19 +378,22 @@ void stl_calculate_volume(stl_file *stl)
 
 static float get_area(stl_facet *facet)
 {
-	float cross[3][3];
+	double cross[3][3];
 	float sum[3];
 	float n[3];
 	float area;
 	int i;
 	
+	// cast to double before calculating cross product because large coordinates
+	// can result in overflowing product
+	// (bad area is responsible for bad volume and bad facets reversal)
 	for(i = 0; i < 3; i++){
-	    cross[i][0]=((facet->vertex[i].y * facet->vertex[(i + 1) % 3].z) -
-			 (facet->vertex[i].z * facet->vertex[(i + 1) % 3].y));
-	    cross[i][1]=((facet->vertex[i].z * facet->vertex[(i + 1) % 3].x) -
-			 (facet->vertex[i].x * facet->vertex[(i + 1) % 3].z));
-	    cross[i][2]=((facet->vertex[i].x * facet->vertex[(i + 1) % 3].y) -
-			 (facet->vertex[i].y * facet->vertex[(i + 1) % 3].x));
+	    cross[i][0]=(((double)facet->vertex[i].y * (double)facet->vertex[(i + 1) % 3].z) -
+			 ((double)facet->vertex[i].z * (double)facet->vertex[(i + 1) % 3].y));
+	    cross[i][1]=(((double)facet->vertex[i].z * (double)facet->vertex[(i + 1) % 3].x) -
+			 ((double)facet->vertex[i].x * (double)facet->vertex[(i + 1) % 3].z));
+	    cross[i][2]=(((double)facet->vertex[i].x * (double)facet->vertex[(i + 1) % 3].y) -
+			 ((double)facet->vertex[i].y * (double)facet->vertex[(i + 1) % 3].x));
 	}
 	
 	sum[0] = cross[0][0] + cross[1][0] + cross[2][0];

@@ -1,6 +1,12 @@
 #include "MultiPoint.hpp"
+#include "BoundingBox.hpp"
 
 namespace Slic3r {
+
+MultiPoint::operator Points() const
+{
+    return this->points;
+}
 
 void
 MultiPoint::scale(double factor)
@@ -19,7 +25,7 @@ MultiPoint::translate(double x, double y)
 }
 
 void
-MultiPoint::rotate(double angle, Point* center)
+MultiPoint::rotate(double angle, const Point &center)
 {
     for (Points::iterator it = points.begin(); it != points.end(); ++it) {
         (*it).rotate(angle, center);
@@ -32,10 +38,10 @@ MultiPoint::reverse()
     std::reverse(this->points.begin(), this->points.end());
 }
 
-Point*
+Point
 MultiPoint::first_point() const
 {
-    return new Point(this->points.front());
+    return this->points.front();
 }
 
 double
@@ -53,6 +59,56 @@ bool
 MultiPoint::is_valid() const
 {
     return this->points.size() >= 2;
+}
+
+int
+MultiPoint::find_point(const Point &point) const
+{
+    for (Points::const_iterator it = this->points.begin(); it != this->points.end(); ++it) {
+        if (it->coincides_with(point)) return it - this->points.begin();
+    }
+    return -1;  // not found
+}
+
+void
+MultiPoint::bounding_box(BoundingBox* bb) const
+{
+    *bb = BoundingBox(this->points);
+}
+
+Points
+MultiPoint::_douglas_peucker(const Points &points, const double tolerance)
+{
+    Points results;
+    double dmax = 0;
+    size_t index = 0;
+    Line full(points.front(), points.back());
+    for (Points::const_iterator it = points.begin() + 1; it != points.end(); ++it) {
+        double d = it->distance_to(full);
+        if (d > dmax) {
+            index = it - points.begin();
+            dmax = d;
+        }
+    }
+    if (dmax >= tolerance) {
+        Points dp0;
+        dp0.reserve(index + 1);
+        dp0.insert(dp0.end(), points.begin(), points.begin() + index + 1);
+        Points dp1 = MultiPoint::_douglas_peucker(dp0, tolerance);
+        results.reserve(results.size() + dp1.size() - 1);
+        results.insert(results.end(), dp1.begin(), dp1.end() - 1);
+        
+        dp0.clear();
+        dp0.reserve(points.size() - index + 1);
+        dp0.insert(dp0.end(), points.begin() + index, points.end());
+        dp1 = MultiPoint::_douglas_peucker(dp0, tolerance);
+        results.reserve(results.size() + dp1.size());
+        results.insert(results.end(), dp1.begin(), dp1.end());
+    } else {
+        results.push_back(points.front());
+        results.push_back(points.back());
+    }
+    return results;
 }
 
 #ifdef SLIC3RXS
@@ -85,7 +141,7 @@ MultiPoint::to_AV() {
     AV* av = newAV();
     av_extend(av, num_points-1);
     for (unsigned int i = 0; i < num_points; i++) {
-        av_store(av, i, this->points[i].to_SV_ref());
+        av_store(av, i, perl_to_SV_ref(this->points[i]));
     }
     return newRV_noinc((SV*)av);
 }

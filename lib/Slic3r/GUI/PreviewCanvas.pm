@@ -2,7 +2,7 @@ package Slic3r::GUI::PreviewCanvas;
 use strict;
 use warnings;
 
-use Wx qw(:cursor); #DIY to pass eclipse verification - peng
+use Wx qw(:cursor); #DIY remove warning of eclipse
 use Wx::Event qw(EVT_PAINT EVT_SIZE EVT_ERASE_BACKGROUND EVT_IDLE EVT_MOUSEWHEEL EVT_MOUSE_EVENTS);
 # must load OpenGL *before* Wx::GLCanvas
 use OpenGL qw(:glconstants :glfunctions :glufunctions);
@@ -13,13 +13,19 @@ use Slic3r::Geometry qw(X Y Z MIN MAX triangle_normal normalize deg2rad tan);
 use Wx::GLCanvas qw(:all);
  
 __PACKAGE__->mk_accessors( qw(quat dirty init mview_init
-                              object_center object_size
+                              object_bounding_box object_shift
                               volumes initpos
-                              sphi stheta) );
+                              sphi stheta
+                              cutting_plane_z
+                              ) );
 
 use constant TRACKBALLSIZE => 0.8;
 use constant TURNTABLE_MODE => 1;
+use constant SELECTED_COLOR => [0,1,0,1];
 use constant COLORS => [ [1,1,1], [1,0.5,0.5], [0.5,1,0.5], [0.5,0.5,1] ];
+
+# make OpenGL::Array thread-safe
+*OpenGL::Array::CLONE_SKIP = sub { 1 };
 
 sub new {
     my ($class, $parent, $object) = @_;
@@ -29,38 +35,7 @@ sub new {
     $self->sphi(45);
     $self->stheta(-45);
 
-    $object->align_to_origin;
-    $self->object_center($object->center);
-    $self->object_size($object->size);
-    
-    # group mesh(es) by material
-    my @materials = ();
-    $self->volumes([]);
-    foreach my $volume (@{$object->volumes}) {
-        my $mesh = $volume->mesh;
-        $mesh->repair;
-        
-        my $material_id = $volume->material_id // '_';
-        my $color_idx = first { $materials[$_] eq $material_id } 0..$#materials;
-        if (!defined $color_idx) {
-            push @materials, $material_id;
-            $color_idx = $#materials;
-        }
-        push @{$self->volumes}, my $v = {
-            color => COLORS->[ $color_idx % scalar(@{&COLORS}) ],
-        };
-        
-        {
-            my $vertices = $mesh->vertices;
-            my @verts = map @{ $vertices->[$_] }, map @$_, @{$mesh->facets};
-            $v->{verts} = OpenGL::Array->new_list(GL_FLOAT, @verts);
-        }
-        
-        {
-            my @norms = map { @$_, @$_, @$_ } @{$mesh->normals};
-            $v->{norms} = OpenGL::Array->new_list(GL_FLOAT, @norms);
-        }
-    }
+    $self->load_object($object);
     
     EVT_PAINT($self, sub {
         my $dc = Wx::PaintDC->new($self);
@@ -98,6 +73,56 @@ sub new {
     });
     
     return $self;
+}
+
+sub load_object {
+    my ($self, $object) = @_;
+    
+    my $bb = $object->raw_mesh->bounding_box;
+    my $center = $bb->center;
+    $self->object_shift(Slic3r::Pointf3->new(-$center->x, -$center->y, -$bb->z_min));  #,,
+    $bb->translate(@{ $self->object_shift });
+    $self->object_bounding_box($bb);
+    
+    # group mesh(es) by material
+    my @materials = ();
+    $self->volumes([]);
+    
+    # sort volumes: non-modifiers first
+    my @volumes = sort { ($a->modifier // 0) <=> ($b->modifier // 0) } @{$object->volumes};
+    foreach my $volume (@volumes) {
+        my $mesh = $volume->mesh->clone;
+        $mesh->translate(@{ $self->object_shift });  
+        
+        my $material_id = $volume->material_id // '_';
+        my $color_idx = first { $materials[$_] eq $material_id } 0..$#materials;
+        if (!defined $color_idx) {
+            push @materials, $material_id;
+            $color_idx = $#materials;
+        }
+        
+        my $color = [ @{COLORS->[ $color_idx % scalar(@{&COLORS}) ]} ];
+        push @$color, $volume->modifier ? 0.5 : 1;
+        push @{$self->volumes}, my $v = {
+            color => $color,
+        };
+        
+        {
+            my $vertices = $mesh->vertices;
+            my @verts = map @{ $vertices->[$_] }, map @$_, @{$mesh->facets};
+            $v->{verts} = OpenGL::Array->new_list(GL_FLOAT, @verts);
+        }
+        
+        {
+            my @norms = map { @$_, @$_, @$_ } @{$mesh->normals};
+            $v->{norms} = OpenGL::Array->new_list(GL_FLOAT, @norms);
+        }
+    }
+}
+
+sub SetCuttingPlane {
+    my ($self, $z) = @_;
+    $self->cutting_plane_z($z);
 }
 
 # Given an axis and angle, compute quaternion.
@@ -299,7 +324,7 @@ sub ResetModelView {
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
     my $win_size = $self->GetClientSize();
-    my $ratio = $factor * min($win_size->width, $win_size->height) / max(@{ $self->object_size });
+    my $ratio = $factor * min($win_size->width, $win_size->height) / max(@{ $self->object_bounding_box->size });
     glScalef($ratio, $ratio, 1);
 }
 
@@ -314,8 +339,7 @@ sub Resize {
  
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
-    my $object_size = $self->object_size;
-    glOrtho(-$x/2, $x/2, -$y/2, $y/2, 0.5, 2 * max(@$object_size));
+    glOrtho(-$x/2, $x/2, -$y/2, $y/2, 0.5, 2 * max(@{ $self->object_bounding_box->size }));
  
     glMatrixMode(GL_MODELVIEW);
     unless ($self->mview_init) {
@@ -359,46 +383,51 @@ sub InitGL {
  
 sub Render {
     my ($self, $dc) = @_;
- 
-    return unless $self->GetContext;
-    $self->SetCurrent($self->GetContext);
+    
+    # prevent calling SetCurrent() when window is not shown yet
+    return unless $self->IsShownOnScreen;
+    return unless my $context = $self->GetContext;
+    $self->SetCurrent($context);
     $self->InitGL;
 
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glPushMatrix();
 
-    my $object_size = $self->object_size;
+    my $object_size = $self->object_bounding_box->size;
     glTranslatef(0, 0, -max(@$object_size[0..1]));
     my @rotmat = quat_to_rotmatrix($self->quat);
     glMultMatrixd_p(@rotmat[0..15]);
     glRotatef($self->stheta, 1, 0, 0);
     glRotatef($self->sphi, 0, 0, 1);
-    glTranslatef(map -$_, @{ $self->object_center });
+    
+    my $center = $self->object_bounding_box->center;
+    glTranslatef(-$center->x, -$center->y, -$center->z);  #,,
 
     $self->draw_mesh;
     
+    my $z0 = 0;
     # draw axes
     {
-        my $axis_len = 2 * max(@{ $self->object_size });
+        my $axis_len = 2 * max(@{ $object_size });
         glLineWidth(2);
         glBegin(GL_LINES);
         # draw line for x axis
         glColor3f(1, 0, 0);
-        glVertex3f(0, 0, 0);
-        glVertex3f($axis_len, 0, 0);
+        glVertex3f(0, 0, $z0);
+        glVertex3f($axis_len, 0, $z0);
         # draw line for y axis
         glColor3f(0, 1, 0);
-        glVertex3f(0, 0, 0);
-        glVertex3f(0, $axis_len, 0);
+        glVertex3f(0, 0, $z0);
+        glVertex3f(0, $axis_len, $z0);
         # draw line for Z axis
         glColor3f(0, 0, 1);
-        glVertex3f(0, 0, 0);
-        glVertex3f(0, 0, $axis_len);
+        glVertex3f(0, 0, $z0);
+        glVertex3f(0, 0, $z0+$axis_len);
         glEnd();
         
         # draw ground
-        my $ground_z = -0.02;
+        my $ground_z = $z0-0.02;
         glDisable(GL_CULL_FACE);
         glEnable(GL_BLEND);
 	    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -424,6 +453,23 @@ sub Render {
             glVertex3f($axis_len, $y, $ground_z);
         }
         glEnd();
+        
+        # draw cutting plane
+        if (defined $self->cutting_plane_z) {
+            my $plane_z = $z0 + $self->cutting_plane_z;
+            glDisable(GL_CULL_FACE);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glBegin(GL_QUADS);
+            glColor4f(1, 0.8, 0.8, 0.5);
+            glVertex3f(-$axis_len, -$axis_len, $plane_z);
+            glVertex3f($axis_len, -$axis_len, $plane_z);
+            glVertex3f($axis_len, $axis_len, $plane_z);
+            glVertex3f(-$axis_len, $axis_len, $plane_z);
+            glEnd();
+            glEnable(GL_CULL_FACE);
+            glDisable(GL_BLEND);
+        }
     }
 
     glPopMatrix();
@@ -435,6 +481,8 @@ sub Render {
 sub draw_mesh {
     my $self = shift;
     
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_CULL_FACE);
     glEnableClientState(GL_VERTEX_ARRAY);
     glEnableClientState(GL_NORMAL_ARRAY);
@@ -444,7 +492,11 @@ sub draw_mesh {
         
         glCullFace(GL_BACK);
         glNormalPointer_p($volume->{norms});
-        glColor3f(@{ $volume->{color} });
+        if ($volume->{selected}) {
+            glColor4f(@{ &SELECTED_COLOR });
+        } else {
+            glColor4f(@{ $volume->{color} });
+        }
         glDrawArrays(GL_TRIANGLES, 0, $volume->{verts}->elements / 3);
     }
     

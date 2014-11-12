@@ -1,15 +1,36 @@
 #include "ExtrusionEntityCollection.hpp"
+#include <algorithm>
+#include <map>
 
 namespace Slic3r {
+
+ExtrusionEntityCollection::ExtrusionEntityCollection(const ExtrusionEntityCollection& collection)
+    : no_sort(collection.no_sort), orig_indices(collection.orig_indices)
+{
+    this->entities.reserve(collection.entities.size());
+    for (ExtrusionEntitiesPtr::const_iterator it = collection.entities.begin(); it != collection.entities.end(); ++it)
+        this->entities.push_back((*it)->clone());
+}
+
+ExtrusionEntityCollection& ExtrusionEntityCollection::operator= (const ExtrusionEntityCollection &other)
+{
+    ExtrusionEntityCollection tmp(other);
+    this->swap(tmp);
+    return *this;
+}
+
+void
+ExtrusionEntityCollection::swap (ExtrusionEntityCollection &c)
+{
+    std::swap(this->entities, c.entities);
+    std::swap(this->orig_indices, c.orig_indices);
+    std::swap(this->no_sort, c.no_sort);
+}
 
 ExtrusionEntityCollection*
 ExtrusionEntityCollection::clone() const
 {
-    ExtrusionEntityCollection* collection = new ExtrusionEntityCollection (*this);
-    for (ExtrusionEntitiesPtr::iterator it = collection->entities.begin(); it != collection->entities.end(); ++it) {
-        *it = (*it)->clone();
-    }
-    return collection;
+    return new ExtrusionEntityCollection(*this);
 }
 
 void
@@ -21,62 +42,74 @@ ExtrusionEntityCollection::reverse()
     std::reverse(this->entities.begin(), this->entities.end());
 }
 
-Point*
+Point
 ExtrusionEntityCollection::first_point() const
 {
     return this->entities.front()->first_point();
 }
 
-Point*
+Point
 ExtrusionEntityCollection::last_point() const
 {
     return this->entities.back()->last_point();
 }
 
-ExtrusionEntityCollection*
-ExtrusionEntityCollection::chained_path(bool no_reverse) const
+void
+ExtrusionEntityCollection::chained_path(ExtrusionEntityCollection* retval, bool no_reverse, std::vector<size_t>* orig_indices) const
 {
-    if (this->entities.empty()) {
-        return new ExtrusionEntityCollection ();
-    }
-    return this->chained_path_from(this->entities.front()->first_point(), no_reverse);
+    if (this->entities.empty()) return;
+    this->chained_path_from(this->entities.front()->first_point(), retval, no_reverse, orig_indices);
 }
 
-ExtrusionEntityCollection*
-ExtrusionEntityCollection::chained_path_from(Point* start_near, bool no_reverse) const
+void
+ExtrusionEntityCollection::chained_path_from(Point start_near, ExtrusionEntityCollection* retval, bool no_reverse, std::vector<size_t>* orig_indices) const
 {
-    if (this->no_sort) return this->clone();
-    ExtrusionEntityCollection* retval = new ExtrusionEntityCollection;
+    if (this->no_sort) {
+        *retval = *this;
+        return;
+    }
+    retval->entities.reserve(this->entities.size());
+    retval->orig_indices.reserve(this->entities.size());
+    
+    // if we're asked to return the original indices, build a map
+    std::map<ExtrusionEntity*,size_t> indices_map;
     
     ExtrusionEntitiesPtr my_paths;
     for (ExtrusionEntitiesPtr::const_iterator it = this->entities.begin(); it != this->entities.end(); ++it) {
-        my_paths.push_back((*it)->clone());
+        ExtrusionEntity* entity = (*it)->clone();
+        my_paths.push_back(entity);
+        if (orig_indices != NULL) indices_map[entity] = it - this->entities.begin();
     }
     
     Points endpoints;
     for (ExtrusionEntitiesPtr::iterator it = my_paths.begin(); it != my_paths.end(); ++it) {
-        endpoints.push_back(*(*it)->first_point());
+        endpoints.push_back((*it)->first_point());
         if (no_reverse) {
-            endpoints.push_back(*(*it)->first_point());
+            endpoints.push_back((*it)->first_point());
         } else {
-            endpoints.push_back(*(*it)->last_point());
+            endpoints.push_back((*it)->last_point());
         }
     }
     
     while (!my_paths.empty()) {
         // find nearest point
-        int start_index = start_near->nearest_point_index(endpoints);
+        int start_index = start_near.nearest_point_index(endpoints);
         int path_index = start_index/2;
+        ExtrusionEntity* entity = my_paths.at(path_index);
         if (start_index % 2 && !no_reverse) {
-            my_paths.at(path_index)->reverse();
+            entity->reverse();
         }
         retval->entities.push_back(my_paths.at(path_index));
+        if (orig_indices != NULL) orig_indices->push_back(indices_map[entity]);
         my_paths.erase(my_paths.begin() + path_index);
         endpoints.erase(endpoints.begin() + 2*path_index, endpoints.begin() + 2*path_index + 2);
         start_near = retval->entities.back()->last_point();
     }
-    
-    return retval;
 }
+
+#ifdef SLIC3RXS
+// there is no ExtrusionLoop::Collection or ExtrusionEntity::Collection
+REGISTER_CLASS(ExtrusionEntityCollection, "ExtrusionPath::Collection");
+#endif
 
 }

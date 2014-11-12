@@ -1,4 +1,4 @@
-use Test::More tests => 13;
+use Test::More tests => 18;
 use strict;
 use warnings;
 
@@ -9,7 +9,8 @@ BEGIN {
 
 use List::Util qw(first);
 use Slic3r;
-use Slic3r::Geometry qw(epsilon);
+use Slic3r::Geometry qw(epsilon scale);
+use Slic3r::Geometry::Clipper qw(diff);
 use Slic3r::Test;
 
 {
@@ -19,17 +20,23 @@ use Slic3r::Test;
     
     my $test = sub {
         my $print = Slic3r::Test::init_print('20mm_cube', config => $config);
-        $print->init_extruders;
-        my $flow = $print->support_material_flow;
+        $print->print->init_extruders;
+        my $flow = $print->print->objects->[0]->support_material_flow;
         my $support_z = Slic3r::Print::SupportMaterial
-            ->new(config => $config, flow => $flow)
+            ->new(
+                object_config       => $print->print->objects->[0]->config,
+                print_config        => $print->print->config,
+                flow                => $flow,
+                interface_flow      => $flow,
+                first_layer_flow    => $flow,
+            )
             ->support_layers_z(\@contact_z, \@top_z, $config->layer_height);
         
         is $support_z->[0], $config->first_layer_height,
             'first layer height is honored';
         is scalar(grep { $support_z->[$_]-$support_z->[$_-1] <= 0 } 1..$#$support_z), 0,
             'no null or negative support layers';
-        is scalar(grep { $support_z->[$_]-$support_z->[$_-1] > $flow->nozzle_diameter + epsilon } 1..$#$support_z), 0,
+        is scalar(grep { $support_z->[$_]-$support_z->[$_-1] > $config->nozzle_diameter->[0] + epsilon } 1..$#$support_z), 0,
             'no layers thicker than nozzle diameter';
         
         my $wrong_top_spacing = 0;
@@ -39,7 +46,7 @@ use Slic3r::Test;
             
             # check that first support layer above this top surface is spaced with nozzle diameter
             $wrong_top_spacing = 1
-                if ($support_z->[$layer_id+1] - $support_z->[$layer_id]) != $flow->nozzle_diameter;
+                if ($support_z->[$layer_id+1] - $support_z->[$layer_id]) != $config->nozzle_diameter->[0];
         }
         ok !$wrong_top_spacing, 'layers above top surfaces are spaced correctly';
     };
@@ -86,6 +93,80 @@ use Slic3r::Test;
             }
         }
     });
+}
+
+{
+    my $config = Slic3r::Config->new_from_defaults;
+    $config->set('skirts', 0);
+    $config->set('raft_layers', 3);
+    $config->set('support_material_pattern', 'honeycomb');
+    $config->set('support_material_extrusion_width', 0.6);
+    $config->set('first_layer_extrusion_width', '100%');
+    my $print = Slic3r::Test::init_print('20mm_cube', config => $config);
+    
+    my $layer_id = 0;
+    my @raft = my @first_object_layer = ();
+    Slic3r::GCode::Reader->new->parse(Slic3r::Test::gcode($print), sub {
+        my ($self, $cmd, $args, $info) = @_;
+        
+        if ($info->{extruding} && $info->{dist_XY} > 0) {
+            if ($layer_id <= $config->raft_layers) {
+                # this is a raft layer or the first object layer
+                my $line = Slic3r::Line->new_scale([ $self->X, $self->Y ], [ $info->{new_X}, $info->{new_Y} ]);
+                my @path = @{$line->grow(scale($config->support_material_extrusion_width/2))};
+                if ($layer_id < $config->raft_layers) {
+                    # this is a raft layer
+                    push @raft, @path;
+                } else {
+                    push @first_object_layer, @path;
+                }
+            }
+        } elsif ($cmd eq 'G1' && $info->{dist_Z} > 0) {
+            $layer_id++;
+        }
+    });
+    
+    ok !@{diff(\@first_object_layer, \@raft)},
+        'first object layer is completely supported by raft';
+}
+
+{
+    my $config = Slic3r::Config->new_from_defaults;
+    $config->set('skirts', 0);
+    $config->set('layer_height', 0.35);
+    $config->set('first_layer_height', 0.3);
+    $config->set('nozzle_diameter', [0.5]);
+    $config->set('support_material_extruder', 2);
+    $config->set('support_material_interface_extruder', 2);
+    
+    my $test = sub {
+        my ($raft_layers) = @_;
+        $config->set('raft_layers', $raft_layers);
+        my $print = Slic3r::Test::init_print('20mm_cube', config => $config);
+        my %raft_z = ();  # z => 1
+        my $tool = undef;
+        Slic3r::GCode::Reader->new->parse(Slic3r::Test::gcode($print), sub {
+            my ($self, $cmd, $args, $info) = @_;
+        
+            if ($cmd =~ /^T(\d+)/) {
+                $tool = $1;
+            } elsif ($info->{extruding} && $info->{dist_XY} > 0) {
+                if ($tool == $config->support_material_extruder-1) {
+                    $raft_z{$self->Z} = 1;
+                }
+            }
+        });
+    
+        is scalar(keys %raft_z), $config->raft_layers, 'correct number of raft layers is generated';
+    };
+    
+    $test->(2);
+    $test->(70);
+    
+    $config->set('layer_height', 0.4);
+    $config->set('first_layer_height', 0.35);
+    $test->(3);
+    $test->(70);
 }
 
 __END__

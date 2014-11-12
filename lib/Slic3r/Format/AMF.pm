@@ -35,11 +35,15 @@ sub write_file {
     printf $fh qq{<?xml version="1.0" encoding="UTF-8"?>\n};
     printf $fh qq{<amf unit="millimeter">\n};
     printf $fh qq{  <metadata type="cad">Slic3r %s</metadata>\n}, $Slic3r::VERSION;
-    for my $material_id (sort keys %{ $model->materials }) {
-        my $material = $model->materials->{$material_id};
-        printf $fh qq{  <material id="%d">\n}, $material_id;
+    for my $material_id (sort @{ $model->material_names }) {
+        my $material = $model->get_material($material_id);
+        printf $fh qq{  <material id="%s">\n}, $material_id;
         for (keys %{$material->attributes}) {
              printf $fh qq{    <metadata type=\"%s\">%s</metadata>\n}, $_, $material->attributes->{$_};
+        }
+        my $config = $material->config;
+        foreach my $opt_key (@{$config->get_keys}) {
+             printf $fh qq{    <metadata type=\"slic3r.%s\">%s</metadata>\n}, $opt_key, $config->serialize($opt_key);
         }
         printf $fh qq{  </material>\n};
     }
@@ -47,6 +51,12 @@ sub write_file {
     for my $object_id (0 .. $#{ $model->objects }) {
         my $object = $model->objects->[$object_id];
         printf $fh qq{  <object id="%d">\n}, $object_id;
+        
+        my $config = $object->config;
+        foreach my $opt_key (@{$config->get_keys}) {
+             printf $fh qq{    <metadata type=\"slic3r.%s\">%s</metadata>\n}, $opt_key, $config->serialize($opt_key);
+        }
+        
         printf $fh qq{    <mesh>\n};
         printf $fh qq{      <vertices>\n};
         my @vertices_offset = ();
@@ -72,6 +82,15 @@ sub write_file {
             my $vertices_offset = shift @vertices_offset;
             printf $fh qq{      <volume%s>\n},
                 (!defined $volume->material_id) ? '' : (sprintf ' materialid="%s"', $volume->material_id);
+            
+            my $config = $volume->config;
+            foreach my $opt_key (@{$config->get_keys}) {
+                 printf $fh qq{        <metadata type=\"slic3r.%s\">%s</metadata>\n}, $opt_key, $config->serialize($opt_key);
+            }
+            if ($volume->modifier) {
+                printf $fh qq{        <metadata type=\"slic3r.modifier\">1</metadata>\n};
+            }
+        
             foreach my $facet (@{$volume->mesh->facets}) {
                 printf $fh qq{        <triangle>\n};
                 printf $fh qq{          <v%d>%d</v%d>\n}, $_, $facet->[$_-1] + $vertices_offset, $_ for 1..3;

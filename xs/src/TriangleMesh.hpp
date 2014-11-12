@@ -4,12 +4,15 @@
 #include <myinit.h>
 #include <admesh/stl.h>
 #include <vector>
+#include "BoundingBox.hpp"
 #include "Point.hpp"
 #include "Polygon.hpp"
+#include "ExPolygon.hpp"
 
 namespace Slic3r {
 
 class TriangleMesh;
+class TriangleMeshSlicer;
 typedef std::vector<TriangleMesh*> TriangleMeshPtrs;
 
 class TriangleMesh
@@ -17,6 +20,8 @@ class TriangleMesh
     public:
     TriangleMesh();
     TriangleMesh(const TriangleMesh &other);
+    TriangleMesh& operator= (TriangleMesh other);
+    void swap(TriangleMesh &other);
     ~TriangleMesh();
     void ReadSTLFile(char* input_file);
     void write_ascii(char* output_file);
@@ -26,15 +31,21 @@ class TriangleMesh
     void scale(float factor);
     void scale(std::vector<double> versor);
     void translate(float x, float y, float z);
+    void rotate_x(float angle);
+    void rotate_y(float angle);
+    void rotate_z(float angle);
     void align_to_origin();
     void rotate(double angle, Point* center);
-    //DIY - rotation 360 by FCO, PNI
-    void rotateX(double angle, float center_y, float center_z);
-    void rotateY(double angle, float center_x, float center_z);
-    //DIY end
-    std::vector<Polygons>* slice(const std::vector<double> &z);
+	//DIY rotation 360
+	void rotateX(double angle, float center_y, float center_z);
+	void rotateY(double angle, float center_x, float center_z);
+	//DIY end - PNI
     TriangleMeshPtrs split() const;
     void merge(const TriangleMesh* mesh);
+    void horizontal_projection(ExPolygons &retval) const;
+    void convex_hull(Polygon* hull);
+    void bounding_box(BoundingBoxf3* bb) const;
+    void reset_repair_stats();
     stl_file stl;
     bool repaired;
     
@@ -42,9 +53,13 @@ class TriangleMesh
     SV* to_SV();
     void ReadFromPerl(SV* vertices, SV* facets);
     #endif
+    
+    private:
+    void require_shared_vertices();
+    friend class TriangleMeshSlicer;
 };
 
-enum FacetEdgeType { feNone, feTop, feBottom };
+enum FacetEdgeType { feNone, feTop, feBottom, feHorizontal };
 
 class IntersectionPoint : public Point
 {
@@ -69,6 +84,27 @@ class IntersectionLine
 };
 typedef std::vector<IntersectionLine> IntersectionLines;
 typedef std::vector<IntersectionLine*> IntersectionLinePtrs;
+
+class TriangleMeshSlicer
+{
+    public:
+    TriangleMesh* mesh;
+    TriangleMeshSlicer(TriangleMesh* _mesh);
+    ~TriangleMeshSlicer();
+    void slice(const std::vector<float> &z, std::vector<Polygons>* layers);
+    void slice(const std::vector<float> &z, std::vector<ExPolygons>* layers);
+    void slice_facet(float slice_z, const stl_facet &facet, const int &facet_idx, const float &min_z, const float &max_z, std::vector<IntersectionLine>* lines) const;
+    void cut(float z, TriangleMesh* upper, TriangleMesh* lower);
+    
+    private:
+    typedef std::vector< std::vector<int> > t_facets_edges;
+    t_facets_edges facets_edges;
+    stl_vertex* v_scaled_shared;
+    void make_loops(std::vector<IntersectionLine> &lines, Polygons* loops);
+    void make_expolygons(const Polygons &loops, ExPolygons* slices);
+    void make_expolygons_simple(std::vector<IntersectionLine> &lines, ExPolygons* slices);
+    void make_expolygons(std::vector<IntersectionLine> &lines, ExPolygons* slices);
+};
 
 }
 

@@ -3,28 +3,35 @@
 %{
 #include <myinit.h>
 #include "Line.hpp"
+#include "Polyline.hpp"
 %}
 
 %name{Slic3r::Line} class Line {
     ~Line();
-    Line* clone()
-        %code{% const char* CLASS = "Slic3r::Line"; RETVAL = new Line(*THIS); %};
+    Clone<Line> clone()
+        %code{% RETVAL = THIS; %};
     SV* arrayref()
         %code{% RETVAL = THIS->to_AV(); %};
     SV* pp()
         %code{% RETVAL = THIS->to_SV_pureperl(); %};
-    Point* a()
-        %code{% const char* CLASS = "Slic3r::Point::Ref"; RETVAL = &(THIS->a); %};
-    Point* b()
-        %code{% const char* CLASS = "Slic3r::Point::Ref"; RETVAL = &(THIS->b); %};
+    Ref<Point> a()
+        %code{% RETVAL=&THIS->a; %};
+    Ref<Point> b()
+        %code{% RETVAL=&THIS->b; %};
     void reverse();
     void scale(double factor);
     void translate(double x, double y);
     double length();
-    Point* midpoint()
-         %code{% const char* CLASS = "Slic3r::Point"; RETVAL = THIS->midpoint(); %};
-    Point* point_at(double distance)
-         %code{% const char* CLASS = "Slic3r::Point"; RETVAL = THIS->point_at(distance); %};
+    double atan2_();
+    double orientation();
+    double direction();
+    bool parallel_to(double angle);
+    bool parallel_to_line(Line* line)
+        %code{% RETVAL = THIS->parallel_to(*line); %};
+    Point* midpoint();
+    Clone<Point> point_at(double distance);
+    Polyline* as_polyline()
+        %code{% RETVAL = new Polyline(*THIS); %};
 %{
 
 Line*
@@ -44,7 +51,7 @@ Line::rotate(angle, center_sv)
     CODE:
         Point center;
         center.from_SV_check(center_sv);
-        THIS->rotate(angle, &center);
+        THIS->rotate(angle, center);
 
 bool
 Line::coincides_with(line_sv)
@@ -52,7 +59,7 @@ Line::coincides_with(line_sv)
     CODE:
         Line line;
         line.from_SV_check(line_sv);
-        RETVAL = THIS->coincides_with(&line);
+        RETVAL = THIS->coincides_with(line);
     OUTPUT:
         RETVAL
 

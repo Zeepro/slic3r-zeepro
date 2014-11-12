@@ -11,13 +11,17 @@ class ExtrusionEntityCollection : public ExtrusionEntity
     public:
     ExtrusionEntityCollection* clone() const;
     ExtrusionEntitiesPtr entities;
+    std::vector<size_t> orig_indices;  // handy for XS
     bool no_sort;
     ExtrusionEntityCollection(): no_sort(false) {};
-    ExtrusionEntityCollection* chained_path(bool no_reverse) const;
-    ExtrusionEntityCollection* chained_path_from(Point* start_near, bool no_reverse) const;
+    ExtrusionEntityCollection(const ExtrusionEntityCollection &collection);
+    ExtrusionEntityCollection& operator= (const ExtrusionEntityCollection &other);
+    void swap (ExtrusionEntityCollection &c);
+    void chained_path(ExtrusionEntityCollection* retval, bool no_reverse = false, std::vector<size_t>* orig_indices = NULL) const;
+    void chained_path_from(Point start_near, ExtrusionEntityCollection* retval, bool no_reverse = false, std::vector<size_t>* orig_indices = NULL) const;
     void reverse();
-    Point* first_point() const;
-    Point* last_point() const;
+    Point first_point() const;
+    Point last_point() const;
 };
 
 }

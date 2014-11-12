@@ -3,6 +3,7 @@
 %{
 #include <myinit.h>
 #include "ExtrusionEntity.hpp"
+#include "ExtrusionEntityCollection.hpp"
 %}
 
 %name{Slic3r::ExtrusionPath} class ExtrusionPath {
@@ -16,32 +17,38 @@
     void reverse();
     Lines lines()
         %code{% RETVAL = THIS->polyline.lines(); %};
-    Point* first_point()
-        %code{% const char* CLASS = "Slic3r::Point"; RETVAL = THIS->first_point(); %};
-    Point* last_point()
-        %code{% const char* CLASS = "Slic3r::Point"; RETVAL = THIS->last_point(); %};
+    Clone<Point> first_point();
+    Clone<Point> last_point();
+    void clip_end(double distance);
+    void simplify(double tolerance);
+    double length();
+    bool is_perimeter();
+    bool is_fill();
+    bool is_bridge();
+    std::string gcode(Extruder* extruder, double e, double F,
+        double xofs, double yofs, std::string extrusion_axis,
+        std::string gcode_line_suffix);
 %{
 
 ExtrusionPath*
-_new(CLASS, polyline_sv, role, height, flow_spacing)
+_new(CLASS, polyline_sv, role, mm3_per_mm, width, height)
     char*           CLASS;
     SV*             polyline_sv;
     ExtrusionRole   role;
-    double          height;
-    double          flow_spacing;
+    double          mm3_per_mm;
+    float           width;
+    float           height;
     CODE:
-        RETVAL = new ExtrusionPath ();
+        RETVAL = new ExtrusionPath (role);
         RETVAL->polyline.from_SV_check(polyline_sv);
-        RETVAL->role            = role;
+        RETVAL->mm3_per_mm      = mm3_per_mm;
+        RETVAL->width           = width;
         RETVAL->height          = height;
-        RETVAL->flow_spacing    = flow_spacing;
     OUTPUT:
         RETVAL
 
-Polyline*
+Ref<Polyline>
 ExtrusionPath::polyline(...)
-    PREINIT:
-        const char* CLASS = "Slic3r::Polyline::Ref";
     CODE:
         if (items > 1) {
             THIS->polyline.from_SV_check( ST(1) );
@@ -61,22 +68,32 @@ ExtrusionPath::role(...)
         RETVAL
 
 double
-ExtrusionPath::height(...)
+ExtrusionPath::mm3_per_mm(...)
     CODE:
         if (items > 1) {
-            THIS->height = (double)SvNV(ST(1));
+            THIS->mm3_per_mm = (double)SvNV(ST(1));
         }
-        RETVAL = THIS->height;
+        RETVAL = THIS->mm3_per_mm;
     OUTPUT:
         RETVAL
 
-double
-ExtrusionPath::flow_spacing(...)
+float
+ExtrusionPath::width(...)
     CODE:
         if (items > 1) {
-            THIS->flow_spacing = (double)SvNV(ST(1));
+            THIS->width = (float)SvNV(ST(1));
         }
-        RETVAL = THIS->flow_spacing;
+        RETVAL = THIS->width;
+    OUTPUT:
+        RETVAL
+
+float
+ExtrusionPath::height(...)
+    CODE:
+        if (items > 1) {
+            THIS->height = (float)SvNV(ST(1));
+        }
+        RETVAL = THIS->height;
     OUTPUT:
         RETVAL
 
@@ -88,6 +105,22 @@ ExtrusionPath::append(...)
             p.from_SV_check(ST(i));
             THIS->polyline.points.push_back(p);
         }
+
+ExtrusionEntityCollection*
+ExtrusionPath::intersect_expolygons(ExPolygonCollection* collection)
+    CODE:
+        RETVAL = new ExtrusionEntityCollection ();
+        THIS->intersect_expolygons(*collection, RETVAL);
+    OUTPUT:
+        RETVAL
+
+ExtrusionEntityCollection*
+ExtrusionPath::subtract_expolygons(ExPolygonCollection* collection)
+    CODE:
+        RETVAL = new ExtrusionEntityCollection ();
+        THIS->subtract_expolygons(*collection, RETVAL);
+    OUTPUT:
+        RETVAL
 
 %}
 };
@@ -101,15 +134,14 @@ _constant()
     EXTR_ROLE_PERIMETER                    = erPerimeter
     EXTR_ROLE_EXTERNAL_PERIMETER           = erExternalPerimeter
     EXTR_ROLE_OVERHANG_PERIMETER           = erOverhangPerimeter
-    EXTR_ROLE_CONTOUR_INTERNAL_PERIMETER   = erContourInternalPerimeter
-    EXTR_ROLE_FILL                         = erFill
-    EXTR_ROLE_SOLIDFILL                    = erSolidFill
-    EXTR_ROLE_TOPSOLIDFILL                 = erTopSolidFill
-    EXTR_ROLE_BRIDGE                       = erBrige
-    EXTR_ROLE_INTERNALBRIDGE               = erInternalBridge
+    EXTR_ROLE_FILL                         = erInternalInfill
+    EXTR_ROLE_SOLIDFILL                    = erSolidInfill
+    EXTR_ROLE_TOPSOLIDFILL                 = erTopSolidInfill
+    EXTR_ROLE_BRIDGE                       = erBridgeInfill
+    EXTR_ROLE_GAPFILL                      = erGapFill
     EXTR_ROLE_SKIRT                        = erSkirt
     EXTR_ROLE_SUPPORTMATERIAL              = erSupportMaterial
-    EXTR_ROLE_GAPFILL                      = erGapFill
+    EXTR_ROLE_SUPPORTMATERIAL_INTERFACE    = erSupportMaterialInterface
   PROTOTYPE:
   CODE:
     RETVAL = ix;

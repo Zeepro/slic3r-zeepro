@@ -5,79 +5,107 @@
 
 namespace Slic3r {
 
-Point*
+Polygon::operator Polygons() const
+{
+    Polygons pp;
+    pp.push_back(*this);
+    return pp;
+}
+
+Polygon::operator Polyline() const
+{
+    Polyline polyline;
+    this->split_at_first_point(&polyline);
+    return polyline;
+}
+
+Point&
+Polygon::operator[](Points::size_type idx)
+{
+    return this->points[idx];
+}
+
+const Point&
+Polygon::operator[](Points::size_type idx) const
+{
+    return this->points[idx];
+}
+
+Point
 Polygon::last_point() const
 {
-    return new Point(this->points.front());  // last point == first point for polygons
+    return this->points.front();  // last point == first point for polygons
 }
 
 Lines
 Polygon::lines() const
 {
     Lines lines;
-    lines.reserve(this->points.size());
-    for (Points::const_iterator it = this->points.begin(); it != this->points.end()-1; ++it) {
-        lines.push_back(Line(*it, *(it + 1)));
-    }
-    lines.push_back(Line(this->points.back(), this->points.front()));
+    this->lines(&lines);
     return lines;
 }
 
-Polyline*
-Polygon::split_at(const Point* point) const
+void
+Polygon::lines(Lines* lines) const
+{
+    lines->reserve(lines->size() + this->points.size());
+    for (Points::const_iterator it = this->points.begin(); it != this->points.end()-1; ++it) {
+        lines->push_back(Line(*it, *(it + 1)));
+    }
+    lines->push_back(Line(this->points.back(), this->points.front()));
+}
+
+void
+Polygon::split_at_vertex(const Point &point, Polyline* polyline) const
 {
     // find index of point
     for (Points::const_iterator it = this->points.begin(); it != this->points.end(); ++it) {
-        if (it->coincides_with(point))
-            return this->split_at_index(it - this->points.begin());
+        if (it->coincides_with(point)) {
+            this->split_at_index(it - this->points.begin(), polyline);
+            return;
+        }
     }
     CONFESS("Point not found");
-    return NULL;
 }
 
-Polyline*
-Polygon::split_at_index(int index) const
+void
+Polygon::split_at_index(int index, Polyline* polyline) const
 {
-    Polyline* poly = new Polyline;
-    poly->points.reserve(this->points.size() + 1);
+    polyline->points.reserve(this->points.size() + 1);
     for (Points::const_iterator it = this->points.begin() + index; it != this->points.end(); ++it)
-        poly->points.push_back(*it);
+        polyline->points.push_back(*it);
     for (Points::const_iterator it = this->points.begin(); it != this->points.begin() + index + 1; ++it)
-        poly->points.push_back(*it);
-    return poly;
+        polyline->points.push_back(*it);
 }
 
-Polyline*
-Polygon::split_at_first_point() const
+void
+Polygon::split_at_first_point(Polyline* polyline) const
 {
-    return this->split_at_index(0);
+    this->split_at_index(0, polyline);
 }
 
-Points
-Polygon::equally_spaced_points(double distance) const
+void
+Polygon::equally_spaced_points(double distance, Points* points) const
 {
-    Polyline* polyline = this->split_at_first_point();
-    Points pts = polyline->equally_spaced_points(distance);
-    delete polyline;
-    return pts;
+    Polyline polyline;
+    this->split_at_first_point(&polyline);
+    polyline.equally_spaced_points(distance, points);
 }
 
 double
 Polygon::area() const
 {
-    ClipperLib::Polygon p;
-    Slic3rPolygon_to_ClipperPolygon(*this, p);
+    ClipperLib::Path p;
+    Slic3rMultiPoint_to_ClipperPath(*this, p);
     return ClipperLib::Area(p);
 }
 
 bool
 Polygon::is_counter_clockwise() const
 {
-    ClipperLib::Polygon* p = new ClipperLib::Polygon();
-    Slic3rPolygon_to_ClipperPolygon(*this, *p);
-    bool orientation = ClipperLib::Orientation(*p);
-    delete p;
-    return orientation;
+    ClipperLib::Path p;
+    Slic3rMultiPoint_to_ClipperPath(*this, p);
+    return ClipperLib::Orientation(p);
 }
 
 bool
@@ -112,19 +140,85 @@ Polygon::is_valid() const
     return this->points.size() >= 3;
 }
 
-#ifdef SLIC3RXS
-SV*
-Polygon::to_SV_ref() {
-    SV* sv = newSV(0);
-    sv_setref_pv( sv, "Slic3r::Polygon::Ref", (void*)this );
-    return sv;
+bool
+Polygon::contains_point(const Point &point) const
+{
+    // http://www.ecse.rpi.edu/Homepages/wrf/Research/Short_Notes/pnpoly.html
+    bool result = false;
+    Points::const_iterator i = this->points.begin();
+    Points::const_iterator j = this->points.end() - 1;
+    for (; i != this->points.end(); j = i++) {
+        if ( ((i->y > point.y) != (j->y > point.y))
+            && ((double)point.x < (double)(j->x - i->x) * (double)(point.y - i->y) / (double)(j->y - i->y) + (double)i->x) )
+            result = !result;
+    }
+    return result;
 }
 
-SV*
-Polygon::to_SV_clone_ref() const {
-    SV* sv = newSV(0);
-    sv_setref_pv( sv, "Slic3r::Polygon", new Polygon(*this) );
-    return sv;
+Polygons
+Polygon::simplify(double tolerance) const
+{
+    Polygon p = *this;
+    p.points = MultiPoint::_douglas_peucker(p.points, tolerance);
+    
+    Polygons pp;
+    pp.push_back(p);
+    simplify_polygons(pp, pp);
+    return pp;
+}
+
+void
+Polygon::simplify(double tolerance, Polygons &polygons) const
+{
+    Polygons pp = this->simplify(tolerance);
+    polygons.reserve(polygons.size() + pp.size());
+    polygons.insert(polygons.end(), pp.begin(), pp.end());
+}
+
+// Only call this on convex polygons or it will return invalid results
+void
+Polygon::triangulate_convex(Polygons* polygons) const
+{
+    for (Points::const_iterator it = this->points.begin() + 2; it != this->points.end(); ++it) {
+        Polygon p;
+        p.points.reserve(3);
+        p.points.push_back(this->points.front());
+        p.points.push_back(*(it-1));
+        p.points.push_back(*it);
+        
+        // this should be replaced with a more efficient call to a merge_collinear_segments() method
+        if (p.area() > 0) polygons->push_back(p);
+    }
+}
+
+// center of mass
+Point
+Polygon::centroid() const
+{
+    double area_temp = this->area();
+    double x_temp = 0;
+    double y_temp = 0;
+    
+    Polyline polyline;
+    this->split_at_first_point(&polyline);
+    for (Points::const_iterator point = polyline.points.begin(); point != polyline.points.end() - 1; ++point) {
+        x_temp += (double)( point->x + (point+1)->x ) * ( (double)point->x*(point+1)->y - (double)(point+1)->x*point->y );
+        y_temp += (double)( point->y + (point+1)->y ) * ( (double)point->x*(point+1)->y - (double)(point+1)->x*point->y );
+    }
+    
+    return Point(x_temp/(6*area_temp), y_temp/(6*area_temp));
+}
+
+#ifdef SLIC3RXS
+REGISTER_CLASS(Polygon, "Polygon");
+
+void
+Polygon::from_SV_check(SV* poly_sv)
+{
+    if (sv_isobject(poly_sv) && !sv_isa(poly_sv, perl_class_name(this)) && !sv_isa(poly_sv, perl_class_name_ref(this)))
+        CONFESS("Not a valid %s object", perl_class_name(this));
+    
+    MultiPoint::from_SV_check(poly_sv);
 }
 #endif
 

@@ -91,6 +91,24 @@ diff_ex(subject, clip, safety_offset = false)
     OUTPUT:
         RETVAL
 
+Polylines
+diff_pl(subject, clip)
+    Polylines   subject
+    Polygons    clip
+    CODE:
+        diff(subject, clip, RETVAL);
+    OUTPUT:
+        RETVAL
+
+Polylines
+diff_ppl(subject, clip)
+    Polygons    subject
+    Polygons    clip
+    CODE:
+        diff(subject, clip, RETVAL);
+    OUTPUT:
+        RETVAL
+
 Polygons
 intersection(subject, clip, safety_offset = false)
     Polygons                    subject
@@ -108,6 +126,24 @@ intersection_ex(subject, clip, safety_offset = false)
     bool                        safety_offset
     CODE:
         intersection(subject, clip, RETVAL, safety_offset);
+    OUTPUT:
+        RETVAL
+
+Polylines
+intersection_pl(subject, clip)
+    Polylines                   subject
+    Polygons                    clip
+    CODE:
+        intersection(subject, clip, RETVAL);
+    OUTPUT:
+        RETVAL
+
+Polylines
+intersection_ppl(subject, clip)
+    Polygons                    subject
+    Polygons                    clip
+    CODE:
+        intersection(subject, clip, RETVAL);
     OUTPUT:
         RETVAL
 
@@ -149,6 +185,16 @@ union_pt(subject, safety_offset = false)
         union_pt(subject, polytree, safety_offset);
         
         RETVAL = polynode_children_2_perl(polytree);
+    OUTPUT:
+        RETVAL
+
+Polygons
+union_pt_chained(subject, safety_offset = false)
+    Polygons                    subject
+    bool                        safety_offset
+    CODE:
+        // perform operation
+        union_pt_chained(subject, RETVAL, safety_offset);
     OUTPUT:
         RETVAL
 

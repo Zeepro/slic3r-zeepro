@@ -2,13 +2,14 @@
 
 %{
 #include <myinit.h>
+#include "BoundingBox.hpp"
 #include "Polygon.hpp"
 %}
 
 %name{Slic3r::Polygon} class Polygon {
     ~Polygon();
-    Polygon* clone()
-        %code{% const char* CLASS = "Slic3r::Polygon"; RETVAL = new Polygon(*THIS); %};
+    Clone<Polygon> clone()
+        %code{% RETVAL = THIS; %};
     SV* arrayref()
         %code{% RETVAL = THIS->to_AV(); %};
     SV* pp()
@@ -17,13 +18,14 @@
     void translate(double x, double y);
     void reverse();
     Lines lines();
-    Polyline* split_at(Point* point)
-        %code{% const char* CLASS = "Slic3r::Polyline"; RETVAL = THIS->split_at(point); %};
+    Polyline* split_at_vertex(Point* point)
+        %code{% RETVAL = new Polyline(); THIS->split_at_vertex(*point, RETVAL); %};
     Polyline* split_at_index(int index)
-        %code{% const char* CLASS = "Slic3r::Polyline"; RETVAL = THIS->split_at_index(index); %};
+        %code{% RETVAL = new Polyline(); THIS->split_at_index(index, RETVAL); %};
     Polyline* split_at_first_point()
-        %code{% const char* CLASS = "Slic3r::Polyline"; RETVAL = THIS->split_at_first_point(); %};
-    Points equally_spaced_points(double distance);
+        %code{% RETVAL = new Polyline(); THIS->split_at_first_point(RETVAL); %};
+    Points equally_spaced_points(double distance)
+        %code{% THIS->equally_spaced_points(distance, &RETVAL); %};
     double length();
     double area();
     bool is_counter_clockwise();
@@ -31,8 +33,18 @@
     bool make_counter_clockwise();
     bool make_clockwise();
     bool is_valid();
-    Point* first_point()
-        %code{% const char* CLASS = "Slic3r::Point"; RETVAL = THIS->first_point(); %};
+    Clone<Point> first_point();
+    bool contains_point(Point* point)
+        %code{% RETVAL = THIS->contains_point(*point); %};
+    Polygons simplify(double tolerance);
+    Polygons triangulate_convex()
+        %code{% THIS->triangulate_convex(&RETVAL); %};
+    Clone<Point> centroid();
+    BoundingBox* bounding_box()
+        %code{%
+            RETVAL = new BoundingBox();
+            THIS->bounding_box(RETVAL);
+        %};
 %{
 
 Polygon*
@@ -54,7 +66,7 @@ Polygon::rotate(angle, center_sv)
     CODE:
         Point center;
         center.from_SV_check(center_sv);
-        THIS->rotate(angle, &center);
+        THIS->rotate(angle, center);
 
 %}
 };

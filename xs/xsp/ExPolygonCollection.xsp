@@ -7,15 +7,21 @@
 
 %name{Slic3r::ExPolygon::Collection} class ExPolygonCollection {
     ~ExPolygonCollection();
-    ExPolygonCollection* clone()
-        %code{% const char* CLASS = "Slic3r::ExPolygon::Collection"; RETVAL = new ExPolygonCollection(*THIS); %};
+    Clone<ExPolygonCollection> clone() 
+        %code{% RETVAL = THIS; %};
     void clear()
         %code{% THIS->expolygons.clear(); %};
     void scale(double factor);
     void translate(double x, double y);
-    void rotate(double angle, Point* center);
+    void rotate(double angle, Point* center)
+        %code{% THIS->rotate(angle, *center); %};
     int count()
         %code{% RETVAL = THIS->expolygons.size(); %};
+    bool contains_point(Point* point)
+        %code{% RETVAL = THIS->contains_point(*point); %};
+    void simplify(double tolerance);
+    Polygons polygons()
+        %code{% RETVAL = *THIS; %};
 %{
 
 ExPolygonCollection*
@@ -38,7 +44,7 @@ ExPolygonCollection::arrayref()
         av_fill(av, THIS->expolygons.size()-1);
         int i = 0;
         for (ExPolygons::iterator it = THIS->expolygons.begin(); it != THIS->expolygons.end(); ++it) {
-            av_store(av, i++, (*it).to_SV_ref());
+            av_store(av, i++, perl_to_SV_ref(*it));
         }
         RETVAL = newRV_noinc((SV*)av);
     OUTPUT:
@@ -65,6 +71,14 @@ ExPolygonCollection::append(...)
             expolygon.from_SV_check( ST(i) );
             THIS->expolygons.push_back(expolygon);
         }
+
+Polygon*
+ExPolygonCollection::convex_hull()
+    CODE:
+        RETVAL = new Polygon ();
+        THIS->convex_hull(RETVAL);
+    OUTPUT:
+        RETVAL
 
 %}
 };

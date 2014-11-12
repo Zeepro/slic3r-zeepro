@@ -2,31 +2,44 @@ package Slic3r::Custom::HTTPUI;
 
 use strict;
 use warnings;
+
 use CGI qw/ :standard /;
+#use Data::Dumper;
 use HTTP::Daemon;
 use HTTP::Response;
 use HTTP::Status;
 use URI;
 use URI::QueryParam;
-use Slic3r::Model;
-use Slic3r::Config;
+
 use threads;
+#use threads::shared;
 use utf8;
 use JSON;
 use File::Basename qw(basename);
+
+use Slic3r::XS; # import all symbols (constants etc.) before they get parsed
+use Slic3r::Model;
+use Slic3r::Config;
 use Slic3r::Geometry qw(X Y Z);
+#use Slic3r::Print;
 
 use constant CONFIG_HTTP	=> "config_http.ini";
 
 use constant CONFIG_SLICER		=> "config.ini";
 use constant OUTPUT_GCODE		=> "_sliced_model.gcode";
-use constant OUTPUT_PREVIEW		=> "preview.png";
+#use constant OUTPUT_PREVIEW		=> "preview.png";
+use constant OUTPUT_PREVIEW		=> "preview.tga";
 use constant FILE_STATUS		=> "Slicer.json";
 use constant FILE_PERCENTAGE	=> "Percentage.json";
+use constant FILE_PORT			=> "Slic3rPort.txt";
+#use constant FILE_IN_ADD		=> "add.tmp";
 use constant NUMBER_EXTRUDER	=> 2;
-use constant HEIGHT_PLATFORM	=> 150;
+use constant HEIGHT_PLATFORM	=> 140;
+#TODO pass these two infos into json file
 
 use constant CURRENT_VERSION	=> "1.0";
+use constant START_PORT			=> 8080;
+use constant LISTEN_IP			=> '0.0.0.0'; # 'localhost' for local use only, '0.0.0.0' for all access
 
 my $css = <<CSS;
 		form { display: inline; }
@@ -38,16 +51,14 @@ sub new {
 	my $class = shift;
 	my $config = shift;
 	my $self;
+	my $port_try = START_PORT;
 	
 	# pass config to this class to avoid using the default settings - peng
 	$self->{config_slic3r} = $config;
 	
 	$self->{have_threads} = $Slic3r::have_threads;
-	$Slic3r::have_threads = 0;
-	
-	$self->{d} = HTTP::Daemon->new(
-			LocalAddr => 'localhost', # '0.0.0.0' for all access
-			LocalPort => 8080) || die;
+	print "have_threads: $Slic3r::have_threads\n";
+#	$Slic3r::have_threads = 0;
 	
 	$self->{model} = undef;
 	$self->{thread} = undef;
@@ -58,8 +69,42 @@ sub new {
 			exists($self->{config}->{http}{sdconf}) &&
 			exists($self->{config}->{http}{conf}) &&
 			exists($self->{config}->{http}{model}) &&
-			exists($self->{config}->{http}{preview})) {
+			exists($self->{config}->{http}{preview}) &&
+			exists($self->{config}->{http}{hardconf})) {
 		die "Incorrect or missing config file\n";
+	}
+	
+	{
+		my $jsonfile = $self->{config}->{http}{hardconf};
+		if ( -e $jsonfile ) {
+			my $printerinfo = _load_JSON_path($self, $self->{config}->{http}{hardconf});
+			if (defined($printerinfo)) {
+				if (defined($printerinfo->{xmax}) && defined($printerinfo->{ymax})) {
+					$self->{config_slic3r}->set("bed_size", [$printerinfo->{xmax},$printerinfo->{ymax}]);
+					$self->{config_slic3r}->set("print_center", [$printerinfo->{xmax} / 2,$printerinfo->{ymax} / 2]);
+				}
+			}
+		}
+	}
+	
+	while (1) {
+		eval {
+			$self->{d} = HTTP::Daemon->new(
+					LocalAddr => LISTEN_IP,
+					LocalPort => $port_try) || die "Port in use";
+			
+			1;
+		};
+		if ($@) {
+			++$port_try;
+		} else {
+			print "Start on port $port_try...\n";
+			
+			open my $fh, ">", $self->{config}->{http}{conf} . FILE_PORT;
+			print $fh $port_try;
+			close $fh;
+			last;
+		}
 	}
 	
 	bless $self, $class;
@@ -116,6 +161,11 @@ sub main_loop {
 #					Interrupt slincing
 					
 					slice_halt($self, $r, $c);
+					#TODO FIXME remove me as soon as possible
+					# (halt will lead problem of slic3r, so we exit by myself)
+					$c->close;
+					undef($c);
+					return;
 				} elsif ($r->uri->path eq "/listmodel") {
 #					List of models
 					
@@ -151,7 +201,7 @@ sub main_loop {
 				} else {
 #					Splash screen...
 					
-					_http_response_text($c, 200, 'Slic3r 1.00RC1 - HTTP daemon Zeepro mod');
+					_http_response_text($c, 200, 'Slic3r 1.1.7 - HTTP daemon Zeepro mod');
 				}
 			} elsif ($r->method eq 'POST') {
 				if ($r->uri->path eq "/loadmodel") {
@@ -173,7 +223,12 @@ sub main_loop {
 
 sub add_file {
 	my ($self, $r, $c) = @_;
+	my $scale_max = undef;
+	my $model_size;
 	print "Request: add_file\n";
+	if (defined($r->uri->query_param("noresize"))) {
+		print "\t\tnoresize version\n";
+	}
 	
 	if (!$r->uri->query_param("file")) {
 		_http_response_text($c, 432, 'Missing parameter');
@@ -208,41 +263,111 @@ sub add_file {
 			else {
 				my @models = map {Slic3r::Model->read_from_file($_)} @array_file;
 				$self->{model} = Slic3r::Model->new;
-				my $new_object = $self->{model}->add_object;
-				for my $m (0 .. $#models) {
-					my $model = $models[$m];
-					$self->{model}->set_material($m, { Name => basename($model->{objects}->[0]->{input_file}) });
-					$new_object->add_volume(
-						material_id	=> $m,
-						mesh		=> $model->objects->[0]->volumes->[0]->mesh,
-					);
+				{
+					my $new_object = $self->{model}->add_object;
+					my $model_name = undef;
+					
+					for my $m (0 .. $#models) {
+						my $model = $models[$m];
+						my $material_name = basename($array_file[$m]);
+						
+						$material_name =~ s/\.(stl|obj)$//i;
+						if (defined($model_name)) {
+							$model_name .= ' + ' . $material_name;
+						}
+						else {
+							$model_name = $material_name;
+						}
+						
+						$self->{model}->set_material("$m", { Name => $material_name });
+						$new_object->add_volume(
+							material_id	=> "$m",
+							mesh		=> $model->objects->[0]->volumes->[0]->mesh,
+						);
+					}
+					unless (defined($model_name)) {
+						$model_name = $models[0]->objects->[0]->input_file;
+					}
+					$new_object->set_input_file($model_name);
 				}
-				$new_object->{input_file} = $models[0]->{objects}->[0]->{input_file};
 			}
 			
-			$_->scale($self->{config_slic3r}->scale) for @{$self->{model}->objects};
-			$number_material = scalar keys( %{$self->{model}->{materials}} );
-			if ($number_material == 0) {
-				$self->{model}->set_material(0, {Name => basename($self->{model}->{objects}[0]->{input_file})});
-				$self->{model}->{objects}->[0]->{volumes}->[0]->{material_id} = 0;
-				print "init material, extruder\n";
+#			print "volumes count: " . Dumper(scalar @{$self->{model}->objects->[0]->volumes});
+#			print "materials_count: " . Dumper($self->{model}->objects->[0]->materials_count);
+			$number_material = $self->{model}->objects->[0]->materials_count;
+			if ($number_material > NUMBER_EXTRUDER) {
+				die("Model more than " . NUMBER_EXTRUDER . " materials");
 			}
-			elsif ($number_material > 2) {
-				die("Model more than 2 materials");
-			}
-			foreach my $key (keys $self->{model}->{objects}->[0]->{volumes}) {
-				$self->{model}->{objects}->[0]->{material_mapping}{$key} = $key + 1;
-			}
-			$self->{model}->arrange_objects($self->{config_slic3r});
 			
-			$self->{model}->print_info; #test
+			$self->{model}->add_default_instances();
+			$self->{model}->objects->[0]->center_around_origin;
+			$self->{model}->arrange_objects($self->{config_slic3r}->min_object_distance);
+			
+			{ # assign / init extruder
+				my $model_object = $self->{model}->objects->[0];
+				foreach my $i (0..$#{$model_object->volumes}) {
+					my $volume = $model_object->volumes->[$i];
+					if (defined $volume->material_id) {
+						my $material = $model_object->model->get_material($volume->material_id);
+						my $config = $material->config;
+						my $extruder_id = $i % NUMBER_EXTRUDER + 1; # assign only with available extruder
+						$config->set_ifndef('extruder', $extruder_id);
+					}
+				}
+			}
+			
+			{ # check model size
+				my $bed_size = $self->{config_slic3r}->bed_size;
+#				$model_size = $self->{model}->objects->[0]->bounding_box->size;
+#				print "bed size x: " . Dumper($bed_size->[X]);
+#				print "bed size y: " . Dumper($bed_size->[Y]);
+				$model_size = $self->{model}->objects->[0]->raw_mesh->bounding_box->size;
+				
+				for my $scale_axis ($bed_size->[X] / $model_size->[X],
+						$bed_size->[Y] / $model_size->[Y],
+						HEIGHT_PLATFORM / $model_size->[Z]) {
+					if (!defined($scale_max) || $scale_axis < $scale_max) {
+						$scale_max = $scale_axis;
+					}
+				};
+				
+				# floor the scale value around pourcentage interger
+				$scale_max = int($scale_max * 100) / 100;
+				print "scale max: $scale_max\n";
+				
+				if ($scale_max < 1) {
+					if (defined($r->uri->query_param("noresize"))) {
+						$self->{model}->center_instances_around_point($self->{config_slic3r}->print_center);
+						
+						die("parts won't fit in your print area!");
+					}
+					else {
+						$_->set_scaling_factor($scale_max) for @{ $self->{model}->objects->[0]->instances };
+						$self->{model}->objects->[0]->center_around_origin;
+					}
+				}
+			}
+			
+			$self->{model}->center_instances_around_point($self->{config_slic3r}->print_center);
+			$self->_print_info(); #test
 			
 			1;
 		};
 		if ($@) {
-			_http_response_text($c, 433, $@);
+			if (index($@, "parts won't fit in your print area!") != -1
+					&& defined($r->uri->query_param("noresize"))) {
+				_upload_model_info($self, $c, $model_size, $scale_max);
+			}
+			else {
+				_http_response_text($c, 433, $@);
+			}
 		} else {
-			_http_response_text($c, 200, 'Ok');
+			if (defined($r->uri->query_param("noresize"))) {
+				_upload_model_info($self, $c, $model_size, $scale_max);
+			}
+			else {
+				_http_response_text($c, 200, 'Ok');
+			}
 		}
 		
 		_save_status($self, "Done", $r->uri->as_string);
@@ -257,12 +382,13 @@ sub list_model {
 	
 	my @array_json;
 	my $id_object = -1;
-	
-	foreach my $object (@{$self->{model}->{objects}}) {
-		$id_object++;
-		my %hash_data = _model_info($self, $object);
-		$hash_data{id} = $id_object;
-		push(@array_json, \%hash_data);
+	if (defined($self->{model})) {
+		foreach my $object (@{$self->{model}->objects}) {
+			$id_object++;
+			my %hash_data = _model_info($self, $object);
+			$hash_data{id} = $id_object;
+			push(@array_json, \%hash_data);
+		}
 	}
 	
 	_http_response_text($c, 200, to_json(\@array_json));
@@ -280,10 +406,10 @@ sub remove_model {
 		_http_response_text($c, 432, 'Missing parameter');
 	} else {
 		my $model_id = $r->uri->query_param("id");
-		if (defined($self->{model}->{objects}[$model_id])) {
-			splice ($self->{model}->{objects}, $model_id, 1);
-			if (scalar @{$self->{model}->{objects}}) {
-				$self->{model}->arrange_objects($self->{config_slic3r});
+		if (defined($self->{model}->objects->[$model_id])) {
+			$self->{model}->delete_object($model_id);
+			if (scalar @{$self->{model}->objects}) {
+				$self->{model}->arrange_objects($self->{config_slic3r}->min_object_distance);
 			}
 			_http_response_text($c, 200, 'Ok');
 		} else {
@@ -307,8 +433,8 @@ sub get_model {
 			_http_response_text($c, 432, 'Missing parameter');
 		} else {
 			my $model_id = $r->uri->query_param("id");
-			if (defined($self->{model}->{objects}[$model_id])) {
-				_http_response_text($c, 200, $self->{model}->{objects}[$model_id]->{input_file});
+			if (defined($self->{model}->objects->[$model_id])) {
+				_http_response_text($c, 200, $self->{model}->objects->[$model_id]->input_file);
 			} else {
 				_http_response_text($c, 433, 'Incorrect parameter');
 			}
@@ -327,6 +453,16 @@ sub set_model {
 	unless (defined($self->{model})) {
 		_http_response_text($c, 441, 'Platform empty');
 	} else {
+#		unless (defined($r->uri->query_param("id"))
+#				&& defined($r->uri->query_param("xpos"))
+#				&& defined($r->uri->query_param("ypos"))
+#				&& defined($r->uri->query_param("zpos"))
+#				&& defined($r->uri->query_param("xrot"))
+#				&& defined($r->uri->query_param("yrot"))
+#				&& defined($r->uri->query_param("zrot"))
+#				&& defined($r->uri->query_param("s")) #scale
+#				&& defined($r->uri->query_param("c")) #color
+#				) {
 		unless (defined($r->uri->query_param("id"))) {
 			_http_response_text($c, 432, 'Missing parameter');
 		}
@@ -350,36 +486,40 @@ sub set_model {
 			my $zrot = $r->uri->query_param("zrot");
 			my $scale = $r->uri->query_param("s"); 
 			my $color = $r->uri->query_param("c");
-			if (defined($self->{model}->{objects}[$model_id])) {
+			if (defined($self->{model}->objects->[$model_id])) {
 				eval {
-					my $object = $self->{model}->{objects}[$model_id];
+					my $object = $self->{model}->objects->[$model_id];
 					if (defined($color)) {
 						my $array_color = decode_json($color);
 						my $nb_color = scalar @{$array_color};
-						my $nb_volume = scalar keys( %{$object->{material_mapping}} );
+						my $nb_volume = scalar @{$object->volumes};
 						if ($nb_color != $nb_volume) {
 							die("Incorrect color");
 						}
 						
-						my $id_volume = 0;
-						foreach my $ele_color (@{$array_color}) {
-							$object->{material_mapping}{$id_volume} = int $ele_color;
-							++$id_volume;
+#						print "color to set: " . Dumper($array_color);
+						foreach my $i (0..$#{$object->volumes}) {
+							my $volume = $object->volumes->[$i];
+							if (defined $volume->material_id) {
+								my $material = $object->model->get_material($volume->material_id);
+								my $config = $material->config;
+								$config->set('extruder', int $array_color->[$i]);
+							}
 						}
 					}
 					
-					#TODO do some more intelligent action here for rotation
+					#TO/DO do some more intelligent action here for rotation
 					my %hash_data = _model_info($self, $object);
 					my $scale_ori = $hash_data{s} / 100;
 					my $zrot_ori = $hash_data{zrot} * 1;
 					my $xrot_ori = $hash_data{xrot} * 1;
 					my $yrot_ori = $hash_data{yrot} * 1;
 					my $need_rotation = 0;
+					
 					if (defined($scale)) {
 						$scale /= 100; # percentage to real
 						print "scale: " . $scale_ori . "=>" . $scale . "\n";
-						$object->scale($scale / $scale_ori);
-						$object->{instances}[0]->{scaling_factor} = $scale;
+						$_->set_scaling_factor($scale) for @{ $object->instances };
 					}
 					if (defined($zrot)) {
 						$zrot *= 1;
@@ -404,76 +544,42 @@ sub set_model {
 					}
 					
 					if ($need_rotation > 0) {
-						# recover the orginal status
-						$object->rotateY(-$yrot_ori);
-						$object->rotateX(-$xrot_ori);
-						$object->rotate(-$zrot_ori);
-						
-						if (defined($zrot)) {
-							$object->rotate($zrot);
-							$object->{instances}[0]->{rotation} = $zrot;
-						}
-						else {
-							$object->rotate($zrot_ori);
-						}
-						if (defined($xrot)) {
-							$object->rotateX($xrot);
-							$object->{instances}[0]->{rotationX} = $xrot;
-						}
-						else {
-							$object->rotateX($xrot_ori);
-						}
-						if (defined($yrot)) {
-							$object->rotateY($yrot);
-							$object->{instances}[0]->{rotationY} = $yrot;
-						}
-						else {
-							$object->rotateY($yrot_ori);
+						foreach my $instance (@{ $object->instances }) {
+							if (defined($zrot)) {
+								$instance->set_rotation($zrot);
+							}
+							if (defined($xrot)) {
+								$instance->set_rotationX($xrot);
+							}
+							if (defined($yrot)) {
+								$instance->set_rotationY($yrot);
+							}
 						}
 					}
+					$object->center_around_origin;
+					$self->_print_info(); #test
 					
-					my $bed_size = $self->{config_slic3r}->get("bed_size");
+					# return to original status if error
+					my $bed_size = $self->{config_slic3r}->bed_size;
 					%hash_data = _model_info($self, $object);
 					if ($hash_data{xpos} < 0 || $hash_data{xmax} > $bed_size->[X]
 							|| $hash_data{ypos} < 0 || $hash_data{ymax} > $bed_size->[Y]
 							|| $hash_data{zpos} < 0 || $hash_data{zmax} > HEIGHT_PLATFORM
 							) {
-						# return to original status if error
 						if (defined($scale)) {
-							$object->scale($scale_ori / $scale);
-							$object->{instances}[0]->{scaling_factor} = $scale_ori;
+							$_->set_scaling_factor($scale_ori) for @{ $object->instances };
 						}
 						if ($need_rotation > 0) {
-							if (defined($yrot)) {
-								$object->rotateY(-$yrot);
+							foreach my $instance (@{ $object->instances }) {
+								$instance->set_rotation($zrot_ori);
+								$instance->set_rotationX($xrot_ori);
+								$instance->set_rotationY($yrot_ori);
 							}
-							else {
-								$object->rotateY(-$yrot_ori);
-							}
-							if (defined($xrot)) {
-								$object->rotateX(-$xrot);
-							}
-							else {
-								$object->rotateX(-$xrot_ori);
-							}
-							if (defined($zrot)) {
-								$object->rotate(-$zrot);
-							}
-							else {
-								$object->rotate(-$zrot_ori);
-							}
-							$object->rotate($zrot_ori);
-							$object->{instances}[0]->{rotation} = $zrot_ori;
-							$object->rotateX($xrot_ori);
-							$object->{instances}[0]->{rotationX} = $xrot_ori;
-							$object->rotateY($yrot_ori);
-							$object->{instances}[0]->{rotationY} = $yrot_ori;
 						}
+						$object->center_around_origin;
 						
 						die("Incorrect setting to overload platform");
 					}
-					
-					$object->align_to_origin;
 					
 					1;
 				};
@@ -486,7 +592,7 @@ sub set_model {
 				
 				_http_response_text($c, 200, 'Ok');
 				
-				$self->{model}->print_info; #test
+				$self->_print_info(); #test
 			} else {
 				_http_response_text($c, 433, 'Incorrect parameter');
 			}
@@ -512,27 +618,27 @@ sub set_parameter {
 	}
 	else {
 		if (defined($r->uri->query_param("fill_density"))) {
-			$self->{config_slic3r}->set("fill_density", $r->uri->query_param("fill_density"), 1);
+			$self->{config_slic3r}->set("fill_density", $r->uri->query_param("fill_density"));
 			print "set fill_density " . $self->{config_slic3r}->get("fill_density") . "\n";
 		}
 		if (defined($r->uri->query_param("skirts"))) {
-			$self->{config_slic3r}->set("skirts", $r->uri->query_param("skirts"), 1);
+			$self->{config_slic3r}->set("skirts", $r->uri->query_param("skirts"));
 			print "set skirts " . $self->{config_slic3r}->get("skirts") . "\n";
 		}
 		if (defined($r->uri->query_param("raft_layers"))) {
-			$self->{config_slic3r}->set("raft_layers", $r->uri->query_param("raft_layers"), 1);
+			$self->{config_slic3r}->set("raft_layers", $r->uri->query_param("raft_layers"));
 			print "set raft_layers " . $self->{config_slic3r}->get("raft_layers") . "\n";
 		}
 		if (defined($r->uri->query_param("support_material"))) {
-			$self->{config_slic3r}->set("support_material", $r->uri->query_param("support_material"), 1);
+			$self->{config_slic3r}->set("support_material", $r->uri->query_param("support_material"));
 			print "set support_material " . $self->{config_slic3r}->get("support_material") . "\n";
 		}
 		if (defined($r->uri->query_param("temperature"))) {
-			$self->{config_slic3r}->set("temperature", $r->uri->query_param("temperature"), 1);
+			$self->{config_slic3r}->set_deserialize("temperature", $r->uri->query_param("temperature"));
 			print "set temperature " . $self->{config_slic3r}->serialize("temperature") . "\n";
 		}
 		if (defined($r->uri->query_param("first_layer_temperature"))) {
-			$self->{config_slic3r}->set("first_layer_temperature", $r->uri->query_param("first_layer_temperature"), 1);
+			$self->{config_slic3r}->set_deserialize("first_layer_temperature", $r->uri->query_param("first_layer_temperature"));
 			print "set first_layer_temperature " . $self->{config_slic3r}->serialize("first_layer_temperature") . "\n";
 		}
 		
@@ -543,7 +649,9 @@ sub set_parameter {
 }
 
 sub preview_model {
+	#TODO FIXME adapt me with 1.1.7
 	my ($self, $r, $c) = @_;
+	my $object_preview;
 	print "Request: preview_model\n";
 	
 	# only rendering the first object of model
@@ -573,7 +681,7 @@ sub preview_model {
 		my $input_theta = $r->uri->query_param("theta");
 		my $input_delta = $r->uri->query_param("delta") - 90;
 		my $image_file = $self->{config}->{http}{preview} . OUTPUT_PREVIEW;
-		my $object = $self->{model}->{objects}[0];
+		my $object = $self->{model}->objects->[0];
 		my $input_color1 = $r->uri->query_param("color1") // undef;
 		my $input_color2 = $r->uri->query_param("color2") // undef;
 		my ($data_color1, $data_color2);
@@ -593,20 +701,36 @@ sub preview_model {
 #		print Dumper($data_color1);
 #		print Dumper($data_color2);
 		
-		my $object_preview = Slic3r::Custom::Preview->new(
+		# delete old preview image
+		unlink($image_file);
+		
+		$object_preview = Slic3r::Custom::Preview->new(
 			$object, $input_rho, $input_theta, $input_delta, $image_file,
+			HEIGHT_PLATFORM, $self->{config_slic3r}->bed_size,
 			$data_color1, $data_color2);
-		$object_preview->InitBuffer();
-		$object_preview->Resize();
-		$object_preview->Render();
-		$object_preview->ReleaseRessource();
 		
 		1;
 	};
 	if ($@) {
 		_http_response_text($c, 433, $@);
-	} else {
-		_http_response_text($c, 200, 'Ok' . "\n" . $self->{config}->{http}{preview} . OUTPUT_PREVIEW);
+	}
+	else {
+		eval {
+			$object_preview->InitBuffer();
+			$object_preview->Resize();
+			$object_preview->Render();
+#			$object_preview->ReleaseRessource();
+			
+			1;
+		};
+		if ($@) {
+			$object_preview->ReleaseRessource();
+			_http_response_text($c, 433, $@);
+		} else {
+			$object_preview->ReleaseRessource();
+			_http_response_text($c, 200, 'Ok' . "\n" . $self->{config}->{http}{preview} . OUTPUT_PREVIEW);
+			# for use: "<img src=\"" . $self->{config}->{http}{preview} . OUTPUT_PREVIEW . "\">"
+		}
 	}
 	
 	_save_status($self, "Done", $r->uri->as_string);
@@ -633,7 +757,7 @@ sub reload_config {
 		$self->{config_slic3r}->apply($_) for @external_configs;
 		_http_response_text($c, 200, 'Ok');
 	} else {
-		_http_response_text($c, 500, 'cannot find config file');
+		_http_response_text($c, 500, 'can not find config file');
 	}
 	
 	_save_status($self, "Done", $r->uri->as_string);
@@ -647,9 +771,10 @@ sub slice {
 	
 	_save_status_pHalt($self, "Working", $r->uri->as_string, "/slicehalt");
 	
-	unless (defined($self->{model}) && scalar @{$self->{model}->{objects}} > 0) {
+	unless (defined($self->{model}) && scalar @{$self->{model}->objects} > 0) {
 		_http_response_text($c, 441, 'Platform empty');
 	} else {
+#		if ($Slic3r::have_threads) {
 		if ($self->{have_threads}) { #TODO better check if we are in slicing or not
 			$self->{thread} = threads->create(\&_go_slice, $self, $r->uri->as_string);
 		} else {
@@ -658,14 +783,18 @@ sub slice {
 		_http_response_text($c, 200, 'Ok');
 	}
 	
+#	_save_status($self, "Done", $r->uri->as_string);
 	
 	return;
 }
 
+#TODO FIXME this function will let the second call after halting failed and that will exit the slicer
 sub slice_halt {
+	#TODO FIXME adapt me with 1.1.7
 	my ($self, $r, $c) = @_;
 	print "Request: slice_halt\n";
-
+	
+#	if ($Slic3r::have_threads) {
 	if ($self->{have_threads}) {
 		if ($self->{thread}) {
 			$self->{thread}->kill('KILL')->join();
@@ -708,6 +837,8 @@ sub check_slice {
 		}
 	}
 	
+#	_save_status($self, "Done", $r->uri->as_string);
+	
 	return;
 }
 
@@ -724,21 +855,46 @@ sub _init_file {
 	#TODO check conf file version
 }
 
+sub _print_info() {
+	my $self = shift;
+	
+	$self->{model}->print_info;
+	
+#	my $id_object = -1;
+#	foreach my $object (@{$self->{model}->objects}) {
+#		$id_object++;
+#		my %hash_data = _model_info($self, $object);
+#		$hash_data{id} = $id_object;
+#		print "model info $id_object: " . Dumper(\%hash_data);
+#	}
+}
+
 sub _model_info {
 	my ($self, $object) = @_;
 	
-	my $center = $object->center;
-	my $size = $object->bounding_box->size;
-	my $instance = $object->{instances}[0];
+	my $bb = $object->bounding_box;
+	my $center = $bb->center;
+	my $size = $bb->size;
+	my $instance = $object->instances->[0];
 	my ($xpos, $ypos, $xcen, $ycen, $xmax, $ymax);
 	my @array_color;
 	my %hash_data;
 	
-	foreach my $name (sort keys $object->{material_mapping}) {
-		push (@array_color, $object->{material_mapping}{$name});
+	{
+		foreach my $i (0..$#{$object->volumes}) {
+			my $volume = $object->volumes->[$i];
+			if (defined $volume->material_id) {
+				my $material = $object->model->get_material($volume->material_id);
+				my $config = $material->config;
+				push (@array_color, $config->extruder);
+			}
+		}
 	}
-	$xcen = $self->{config_slic3r}->{print_center}[X] + $instance->{offset}[X];
-	$ycen = $self->{config_slic3r}->{print_center}[Y] + $instance->{offset}[Y];
+	
+#	$xcen = $self->{config_slic3r}->print_center->[X] + $instance->offset->[X];
+#	$ycen = $self->{config_slic3r}->print_center->[Y] + $instance->offset->[Y];
+	$xcen = $instance->offset->[X];
+	$ycen = $instance->offset->[Y];
 	$xpos = $xcen - $size->[X] / 2;
 	$ypos = $ycen - $size->[Y] / 2;
 	$xmax = $xcen + $size->[X] / 2;
@@ -747,56 +903,67 @@ sub _model_info {
 			"xpos"	=> $xpos,
 			"ypos"	=> $ypos,
 			"zpos"	=> 0, #TODO deal it with model
-			"xcen"	=> $xcen,
-			"ycen"	=> $ycen,
+			"xcen"	=> $xcen, # $center->[X],
+			"ycen"	=> $ycen, # $center->[Y],
+			"zcen"	=> $center->[Z],
 			"xmax"	=> $xmax,
 			"ymax"	=> $ymax,
-			"zcen"	=> $center->[Z],
 			"zmax"	=> $size->[Z],
-			"xrot"	=> $instance->{rotationX},
-			"yrot"	=> $instance->{rotationY},
-			"zrot"	=> $instance->{rotation},
-			"s"		=> $instance->{scaling_factor} * 100,
+			"xsize"	=> $size->[X],
+			"ysize"	=> $size->[Y],
+			"zsize"	=> $size->[Z],
+			"xrot"	=> $instance->rotationX,
+			"yrot"	=> $instance->rotationY,
+			"zrot"	=> $instance->rotation,
+			"s"		=> $instance->scaling_factor * 100,
 			"color"	=> \@array_color,
 	);
 	
 	return %hash_data;
 }
 
+sub _upload_model_info {
+	my ($self, $c, $model_size, $scale_max) = @_;
+	my %hash_return = (
+		"id"		=> 0,
+		"xsize"		=> $model_size->[X],
+		"ysize"		=> $model_size->[Y],
+		"zsize"		=> $model_size->[Z],
+		"scalemax"	=> $scale_max * 100,
+	);
+	
+	$self->_print_info(); #test
+	
+	_http_response_text($c, 200, to_json(\%hash_return));
+	
+	return;
+}
+
 sub _go_slice {
 	my $self = shift;
 	my $commandline = shift;
-
+	
 	if ($self->{have_threads}) {
 		local $SIG{'KILL'} = sub {
 			threads->exit();
 		};
 	}
 	
-	_save_percentage($self, FILE_PERCENTAGE, 0);
+	_save_percentage($self, FILE_PERCENTAGE, 0, "Initialization slicing");
 	
 	my $print;
-	my %params;
 	eval {
-		$print = Slic3r::Print->new(config => $self->{config_slic3r});
+		$print = Slic3r::Print->new;
+		$self->{config_slic3r}->validate;
+		$print->apply_config($self->{config_slic3r});
 		
-		foreach my $object (@{$self->{model}->{objects}}) {
-			$object->{instances}[0]->{scaling_factor} = 1;
-			$object->{instances}[0]->{rotation} = 0;
+		foreach my $model_object (@{$self->{model}->objects}) {
+			#repair todo
+			$model_object->mesh->repair;
+			$print->add_model_object($model_object);
 		}
 		
-		$print->add_model($self->{model});
-		
 		$print->validate;
-		
-		%params = (
-			output_file => $self->{config}->{http}{model} . OUTPUT_GCODE,
-			status_cb   => sub {
-				my ($percent, $message) = @_;
-				printf "=> %s\n", $message;
-				_save_percentage($self, FILE_PERCENTAGE, $percent, $message);
-			},
-		);
 	};
 	if ($@) {
 		unlink($self->{config}->{http}{conf} . FILE_PERCENTAGE);
@@ -806,7 +973,13 @@ sub _go_slice {
 	}
 	
 	eval {
-		$print->export_gcode(%params);
+		$print->status_cb(sub {
+				my ($percent, $message) = @_;
+				printf "=> %s\n", $message;
+				_save_percentage($self, FILE_PERCENTAGE, $percent, $message);
+		});
+		$print->process;
+		$print->export_gcode(output_file => $self->{config}->{http}{model} . OUTPUT_GCODE);
 	};
 	if ($@) {
 		unlink($self->{config}->{http}{conf} . FILE_PERCENTAGE);
@@ -937,6 +1110,23 @@ sub _load_JSON {
 	
 	local $/; #Enable 'slurp' mode
 	open my $fh, "<", $self->{config}->{http}{conf} . $file;
+	if (tell($fh) != -1) {
+		$json = <$fh>;
+		close $fh;
+		
+		return decode_json $json;
+	} else {
+		return undef;
+	}
+}
+
+sub _load_JSON_path {
+	my ($self, $file) = @_;
+
+	my $json;
+	
+	local $/; #Enable 'slurp' mode
+	open my $fh, "<", $file;
 	if (tell($fh) != -1) {
 		$json = <$fh>;
 		close $fh;

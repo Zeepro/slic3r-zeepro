@@ -2,7 +2,7 @@ use Test::More;
 use strict;
 use warnings;
 
-plan tests => 26;
+plan tests => 33;
 
 BEGIN {
     use FindBin;
@@ -10,10 +10,19 @@ BEGIN {
 }
 
 use Slic3r;
-use Slic3r::Geometry qw(PI polyline_remove_parallel_continuous_edges 
-    polyline_remove_acute_vertices polygon_remove_acute_vertices
-    polygon_remove_parallel_continuous_edges polygon_is_convex
-    chained_path_points epsilon scale);
+use Slic3r::Geometry qw(PI polygon_is_convex
+    chained_path_from epsilon scale);
+
+{
+    # this test was failing on Windows (GH #1950)
+    my $polygon = Slic3r::Polygon->new(
+        [207802834,-57084522],[196528149,-37556190],[173626821,-25420928],[171285751,-21366123],
+        [118673592,-21366123],[116332562,-25420928],[93431208,-37556191],[82156517,-57084523],
+        [129714478,-84542120],[160244873,-84542120],
+    );
+    my $point = Slic3r::Point->new(95706562, -57294774);
+    ok $polygon->contains_point($point), 'contains_point';
+}
 
 #==========================================================
 
@@ -85,13 +94,6 @@ my $polygons = [
     ),
 ];
 
-my $points = [
-    Slic3r::Point->new(73631077, 371742392),
-    Slic3r::Point->new(73631077, 501742392),
-];
-
-is Slic3r::Geometry::can_connect_points(@$points, $polygons), 0, 'can_connect_points';
-
 #==========================================================
 
 {
@@ -118,31 +120,6 @@ is Slic3r::Geometry::can_connect_points(@$points, $polygons), 0, 'can_connect_po
     is Slic3r::Geometry::angle3points($p2, $p1, $p3), PI(),       'angle3points';
     is Slic3r::Geometry::angle3points($p2, $p1, $p4), PI()/2*3,   'angle3points';
     is Slic3r::Geometry::angle3points($p2, $p1, $p1), 2*PI(),     'angle3points';
-}
-
-#==========================================================
-
-{
-    my $polygon = [
-        [2265447881, 7013509857], [2271869937, 7009802077], [2606221146, 6816764300], [1132221146, 4263721402], 
-        [1098721150, 4205697705], [1228411320, 4130821051], [1557501031, 3940821051], [1737340080, 3836990933], 
-        [1736886253, 3837252951], [1494771522, 3977037948], [2959638603, 6514262167], [3002271522, 6588104548], 
-        [3083252364, 6541350240], [2854283608, 6673545411], [2525193897, 6863545411],
-    ];
-    polygon_remove_parallel_continuous_edges($polygon);
-    polygon_remove_acute_vertices($polygon);
-    is scalar(@$polygon), 4, 'polygon_remove_acute_vertices';
-}
-
-#==========================================================
-
-{
-    my $polygon = [
-        [226.5447881,701.3509857], [260.6221146,681.67643], [109.872115,420.5697705], [149.4771522,397.7037948], 
-        [300.2271522,658.8104548], [308.3252364,654.135024],
-    ];
-    polyline_remove_acute_vertices($polygon);
-    is scalar(@$polygon), 6, 'polyline_remove_acute_vertices';
 }
 
 #==========================================================
@@ -180,14 +157,14 @@ is Slic3r::Geometry::can_connect_points(@$points, $polygons), 0, 'can_connect_po
 {
     my $bb = Slic3r::Geometry::BoundingBox->new_from_points([ map Slic3r::Point->new(@$_), [0, 1], [10, 2], [20, 2] ]);
     $bb->scale(2);
-    is_deeply $bb->extents, [ [0,40], [2,4] ], 'bounding box is scaled correctly';
+    is_deeply [ $bb->min_point->pp, $bb->max_point->pp ], [ [0,2], [40,4] ], 'bounding box is scaled correctly';
 }
 
 #==========================================================
 
 {
     my $line = Slic3r::Line->new([10,10], [20,10]);
-    is +($line->grow(5))[0]->area, Slic3r::Polygon->new([5,5], [25,5], [25,15], [5,15])->area, 'grow line';
+    is $line->grow(5)->[0]->area, Slic3r::Polygon->new([10,5], [20,5], [20,15], [10,15])->area, 'grow line';
 }
 
 #==========================================================
@@ -196,8 +173,43 @@ is Slic3r::Geometry::can_connect_points(@$points, $polygons), 0, 'can_connect_po
     # if chained_path() works correctly, these points should be joined with no diagonal paths
     # (thus 26 units long)
     my @points = map Slic3r::Point->new_scale(@$_), [26,26],[52,26],[0,26],[26,52],[26,0],[0,52],[52,52],[52,0];
-    my @ordered = @{chained_path_points(\@points, $points[0])};
+    my @ordered = @points[@{chained_path_from(\@points, $points[0])}];
     ok !(grep { abs($ordered[$_]->distance_to($ordered[$_+1]) - scale 26) > epsilon } 0..$#ordered-1), 'chained_path';
 }
 
 #==========================================================
+
+{
+    my $line = Slic3r::Line->new([0, 0], [20, 0]);
+    is +Slic3r::Point->new(10, 10)->distance_to_line($line), 10, 'distance_to';
+    is +Slic3r::Point->new(50, 10)->distance_to_line($line), 10, 'distance_to';
+    is +Slic3r::Point->new(0, 0)->distance_to_line($line), 0, 'distance_to';
+    is +Slic3r::Point->new(20, 0)->distance_to_line($line), 0, 'distance_to';
+    is +Slic3r::Point->new(10, 0)->distance_to_line($line), 0, 'distance_to';
+}
+
+#==========================================================
+
+{
+    my $square = Slic3r::Polygon->new_scale(
+        [150,100],
+        [200,100],
+        [200,200],
+        [100,200],
+        [100,100],
+    );
+    is scalar(@{$square->concave_points(PI*4/3)}), 0, 'no concave vertices detected in convex polygon';
+    is scalar(@{$square->convex_points(PI*2/3)}), 4, 'four convex vertices detected in square';
+}
+
+{
+    my $square = Slic3r::Polygon->new_scale(
+        [200,200],
+        [100,200],
+        [100,100],
+        [150,100],
+        [200,100],
+    );
+    is scalar(@{$square->concave_points(PI*4/3)}), 0, 'no concave vertices detected in convex polygon';
+    is scalar(@{$square->convex_points(PI*2/3)}), 4, 'four convex vertices detected in square';
+}

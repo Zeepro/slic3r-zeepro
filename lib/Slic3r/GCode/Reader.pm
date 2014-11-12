@@ -10,6 +10,13 @@ has 'F' => (is => 'rw', default => sub {0});
 our $Verbose = 0;
 my @AXES = qw(X Y Z E);
 
+sub clone {
+    my $self = shift;
+    return (ref $self)->new(
+        map { $_ => $self->$_ } (@AXES, 'F'),
+    );
+}
+
 sub parse {
     my $self = shift;
     my ($gcode, $cb) = @_;
@@ -18,11 +25,11 @@ sub parse {
         print "$raw_line\n" if $Verbose || $ENV{SLIC3R_TESTS_GCODE};
         my $line = $raw_line;
         $line =~ s/\s*;(.*)//; # strip comment
-        next if $line eq '';
         my %info = (comment => $1, raw => $raw_line);
         
         # parse command
         my ($command, @args) = split /\s+/, $line;
+        $command //= '';
         my %args = map { /([A-Z])(.*)/; ($1 => $2) } @args;
         
         # check motion

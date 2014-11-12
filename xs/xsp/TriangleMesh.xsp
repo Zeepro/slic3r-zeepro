@@ -8,8 +8,8 @@
 %name{Slic3r::TriangleMesh} class TriangleMesh {
     TriangleMesh();
     ~TriangleMesh();
-    TriangleMesh* clone()
-        %code{% const char* CLASS = "Slic3r::TriangleMesh"; RETVAL = new TriangleMesh(*THIS); %};
+    Clone<TriangleMesh> clone()
+        %code{% RETVAL = THIS; %};
     void ReadSTLFile(char* input_file);
     void write_ascii(char* output_file);
     void write_binary(char* output_file);
@@ -20,14 +20,27 @@
     void scale_xyz(std::vector<double> versor)
         %code{% THIS->scale(versor); %};
     void translate(float x, float y, float z);
+    void rotate_x(float angle);
+    void rotate_y(float angle);
+    void rotate_z(float angle);
     void align_to_origin();
     void rotate(double angle, Point* center);
-    //DIY - rotation 360 by FCO, PNI
-    void rotateX(double angle, float center_y, float center_z);
-    void rotateY(double angle, float center_x, float center_z);
-    //DIY end
+	//DIY rotation 360
+	void rotateX(double angle, float center_y, float center_z);
+	void rotateY(double angle, float center_x, float center_z);
+	//DIY end - PNI
     TriangleMeshPtrs split();
     void merge(TriangleMesh* mesh);
+    ExPolygons horizontal_projection()
+        %code{% THIS->horizontal_projection(RETVAL); %};
+    BoundingBoxf3* bounding_box()
+        %code{%
+            RETVAL = new BoundingBoxf3();
+            THIS->bounding_box(RETVAL);
+        %};
+    int facets_count()
+        %code{% RETVAL = THIS->stl.stats.number_of_facets; %};
+    void reset_repair_stats();
 %{
 
 SV*
@@ -133,23 +146,37 @@ SV*
 TriangleMesh::slice(z)
     std::vector<double>* z
     CODE:
-        std::vector<Polygons>* layers = THIS->slice(*z);
+        // convert doubles to floats
+        std::vector<float> z_f(z->begin(), z->end());
+        delete z;
+        
+        std::vector<ExPolygons> layers;
+        TriangleMeshSlicer mslicer(THIS);
+        mslicer.slice(z_f, &layers);
         
         AV* layers_av = newAV();
-        av_extend(layers_av, layers->size()-1);
-        for (unsigned int i = 0; i < layers->size(); i++) {
-            AV* polygons_av = newAV();
-            av_extend(polygons_av, (*layers)[i].size()-1);
+        av_extend(layers_av, layers.size()-1);
+        for (unsigned int i = 0; i < layers.size(); i++) {
+            AV* expolygons_av = newAV();
+            av_extend(expolygons_av, layers[i].size()-1);
             unsigned int j = 0;
-            for (Polygons::iterator it = (*layers)[i].begin(); it != (*layers)[i].end(); ++it) {
-                av_store(polygons_av, j++, (*it).to_SV_clone_ref());
+            for (ExPolygons::iterator it = layers[i].begin(); it != layers[i].end(); ++it) {
+                av_store(expolygons_av, j++, perl_to_SV_clone_ref(*it));
             }
-            av_store(layers_av, i, newRV_noinc((SV*)polygons_av));
+            av_store(layers_av, i, newRV_noinc((SV*)expolygons_av));
         }
-        delete layers;
         RETVAL = (SV*)newRV_noinc((SV*)layers_av);
     OUTPUT:
         RETVAL
+
+void
+TriangleMesh::cut(z, upper, lower)
+    float           z;
+    TriangleMesh*   upper;
+    TriangleMesh*   lower;
+    CODE:
+        TriangleMeshSlicer mslicer(THIS);
+        mslicer.cut(z, upper, lower);
 
 std::vector<double>
 TriangleMesh::bb3()
@@ -160,6 +187,14 @@ TriangleMesh::bb3()
         RETVAL.push_back(THIS->stl.stats.max.y);
         RETVAL.push_back(THIS->stl.stats.min.z);
         RETVAL.push_back(THIS->stl.stats.max.z);
+    OUTPUT:
+        RETVAL
+
+Polygon*
+TriangleMesh::convex_hull()
+    CODE:
+        RETVAL = new Polygon ();
+        THIS->convex_hull(RETVAL);
     OUTPUT:
         RETVAL
 
