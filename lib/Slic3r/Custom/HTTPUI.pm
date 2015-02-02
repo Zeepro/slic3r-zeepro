@@ -27,20 +27,22 @@ use constant CONFIG_HTTP	=> "config_http.ini";
 
 use constant CONFIG_SLICER		=> "config.ini";
 use constant OUTPUT_GCODE		=> "_sliced_model.gcode";
+use constant OUTPUT_AMF			=> "_slicer_model.amf";
 #use constant OUTPUT_PREVIEW		=> "preview.png";
 use constant OUTPUT_PREVIEW		=> "preview.tga";
 use constant FILE_STATUS		=> "Slicer.json";
 use constant FILE_PERCENTAGE	=> "Percentage.json";
 use constant FILE_PORT			=> "Slic3rPort.txt";
 #use constant FILE_IN_ADD		=> "add.tmp";
-use constant NUMBER_EXTRUDER	=> 2;
-use constant HEIGHT_PLATFORM	=> 140;
-#TODO pass these two infos into json file
+use constant D_NUMBER_EXTRUDER	=> 2;
+use constant D_HEIGHT_PLATFORM	=> 150;
 
 use constant CURRENT_VERSION	=> "1.0";
 use constant START_PORT			=> 8080;
 use constant LISTEN_IP			=> '0.0.0.0'; # 'localhost' for local use only, '0.0.0.0' for all access
 
+my $number_extruder = D_NUMBER_EXTRUDER; # assign a default value
+my $height_platform = D_HEIGHT_PLATFORM; # assign a default value
 my $css = <<CSS;
 		form { display: inline; }
 CSS
@@ -57,7 +59,7 @@ sub new {
 	$self->{config_slic3r} = $config;
 	
 	$self->{have_threads} = $Slic3r::have_threads;
-	print "have_threads: $Slic3r::have_threads\n";
+#	print "have_threads: $Slic3r::have_threads\n";
 #	$Slic3r::have_threads = 0;
 	
 	$self->{model} = undef;
@@ -82,6 +84,15 @@ sub new {
 				if (defined($printerinfo->{xmax}) && defined($printerinfo->{ymax})) {
 					$self->{config_slic3r}->set("bed_size", [$printerinfo->{xmax},$printerinfo->{ymax}]);
 					$self->{config_slic3r}->set("print_center", [$printerinfo->{xmax} / 2,$printerinfo->{ymax} / 2]);
+					print "Bed size found: X$printerinfo->{xmax}, Y$printerinfo->{ymax}\n";
+				}
+				if (defined($printerinfo->{ExtrudersNumber})) {
+					$number_extruder = $printerinfo->{ExtrudersNumber};
+					print "Extruder number found: $number_extruder\n";
+				}
+				if (defined($printerinfo->{zmax})) {
+					$height_platform = $printerinfo->{zmax};
+					print "Platform height found: $height_platform\n";
 				}
 			}
 		}
@@ -179,9 +190,13 @@ sub main_loop {
 					
 					get_model($self, $r, $c);
 				} elsif ($r->uri->path eq "/setmodel") {
-#					Set model filepath by ID
+#					Set model coordinate by ID
 					
 					set_model($self, $r, $c);
+				} elsif ($r->uri->path eq "/resetmodel") {
+#					Reset model coordinate by ID
+					
+					reset_model($self, $r, $c);
 				} elsif ($r->uri->path eq "/preview") {
 #					Rendering model preview (can't be interrupted)
 					
@@ -194,6 +209,14 @@ sub main_loop {
 #					Set temporary parameters
 					
 					set_parameter($self, $r, $c);
+				} elsif ($r->uri->path eq "/checksizes") {
+#					Check all model sizes
+					
+					check_sizes($self, $r, $c);
+				} elsif ($r->uri->path eq "/exportamf") {
+#					Export AMF of model(s)
+					
+					export_amf($self, $r, $c);
 				} elsif ($r->uri->path eq "/test") {
 #					Test method
 					
@@ -273,13 +296,16 @@ sub add_file {
 						
 						$material_name =~ s/\.(stl|obj)$//i;
 						if (defined($model_name)) {
-							$model_name .= ' + ' . $material_name;
+							$model_name .= '|' . $array_file[$m];
 						}
 						else {
-							$model_name = $material_name;
+							$model_name = $array_file[$m];
 						}
 						
+						# default attribute assignment not work, so we set its attribute again after creation
 						$self->{model}->set_material("$m", { Name => $material_name });
+						$self->{model}->get_material($m)->set_attribute("Name", $material_name);
+						
 						$new_object->add_volume(
 							material_id	=> "$m",
 							mesh		=> $model->objects->[0]->volumes->[0]->mesh,
@@ -295,8 +321,8 @@ sub add_file {
 #			print "volumes count: " . Dumper(scalar @{$self->{model}->objects->[0]->volumes});
 #			print "materials_count: " . Dumper($self->{model}->objects->[0]->materials_count);
 			$number_material = $self->{model}->objects->[0]->materials_count;
-			if ($number_material > NUMBER_EXTRUDER) {
-				die("Model more than " . NUMBER_EXTRUDER . " materials");
+			if ($number_material > $number_extruder) {
+				die("Model more than " . $number_extruder . " materials");
 			}
 			
 			$self->{model}->add_default_instances();
@@ -310,7 +336,7 @@ sub add_file {
 					if (defined $volume->material_id) {
 						my $material = $model_object->model->get_material($volume->material_id);
 						my $config = $material->config;
-						my $extruder_id = $i % NUMBER_EXTRUDER + 1; # assign only with available extruder
+						my $extruder_id = $i % $number_extruder + 1; # assign only with available extruder
 						$config->set_ifndef('extruder', $extruder_id);
 					}
 				}
@@ -325,7 +351,7 @@ sub add_file {
 				
 				for my $scale_axis ($bed_size->[X] / $model_size->[X],
 						$bed_size->[Y] / $model_size->[Y],
-						HEIGHT_PLATFORM / $model_size->[Z]) {
+						$height_platform / $model_size->[Z]) {
 					if (!defined($scale_max) || $scale_axis < $scale_max) {
 						$scale_max = $scale_axis;
 					}
@@ -439,6 +465,28 @@ sub get_model {
 				_http_response_text($c, 433, 'Incorrect parameter');
 			}
 		}
+	}
+	
+	_save_status($self, "Done", $r->uri->as_string);
+	
+	return;
+}
+
+sub check_sizes {
+	my ($self, $r, $c) = @_;
+	print "Request: check_size\n";
+	
+	unless (defined($self->{model})) {
+		_http_response_text($c, 441, 'Platform empty');
+	} else {
+		my $oversize = 0;
+		my $code = 200;
+		
+		$oversize = _check_size_total($self);
+		if ($oversize > 0) {
+			$code = 202;
+		}
+		_http_response_text($c, $code, $oversize);
 	}
 	
 	_save_status($self, "Done", $r->uri->as_string);
@@ -562,10 +610,7 @@ sub set_model {
 					# return to original status if error
 					my $bed_size = $self->{config_slic3r}->bed_size;
 					%hash_data = _model_info($self, $object);
-					if ($hash_data{xpos} < 0 || $hash_data{xmax} > $bed_size->[X]
-							|| $hash_data{ypos} < 0 || $hash_data{ymax} > $bed_size->[Y]
-							|| $hash_data{zpos} < 0 || $hash_data{zmax} > HEIGHT_PLATFORM
-							) {
+					if (_check_size_model($bed_size, \%hash_data)) {
 						if (defined($scale)) {
 							$_->set_scaling_factor($scale_ori) for @{ $object->instances };
 						}
@@ -587,10 +632,11 @@ sub set_model {
 					print "ErrMsg: " . $@ . "\n";
 					_http_response_text($c, 433, $@);
 				} else {
-					_http_response_text($c, 200, 'Ok');
+#					_http_response_text($c, 200, 'Ok');
+					my %hash_data = _model_info($self, $self->{model}->objects->[$model_id]);
+					
+					_http_response_text($c, 200, to_json(\%hash_data));
 				}
-				
-				_http_response_text($c, 200, 'Ok');
 				
 				$self->_print_info(); #test
 			} else {
@@ -602,6 +648,70 @@ sub set_model {
 	_save_status($self, "Done", $r->uri->as_string);
 	
 	return;
+}
+
+sub reset_model {
+	my ($self, $r, $c) = @_;
+	print "Request: reset_model\n";
+	
+	unless (defined($self->{model})) {
+		_http_response_text($c, 441, 'Platform empty');
+	} else {
+		unless (defined($r->uri->query_param("id"))) {
+			_http_response_text($c, 432, 'Missing parameter');
+		}
+		else {
+			my $model_id = $r->uri->query_param("id");
+			if (defined($self->{model}->objects->[$model_id])) {
+				eval {
+					my $object = $self->{model}->objects->[$model_id];
+					
+					$_->set_scaling_factor(1) for @{ $object->instances };
+					foreach my $instance (@{ $object->instances }) {
+						$instance->set_rotation(0);
+						$instance->set_rotationX(0);
+						$instance->set_rotationY(0);
+					}
+					$object->center_around_origin;
+					
+					# return to original status if error
+					my $bed_size = $self->{config_slic3r}->bed_size;
+					my %hash_data = _model_info($self, $object);
+					if ($hash_data{smax} < 100) {
+						my $scale_reset = int($hash_data{smax}) / 100;
+						
+						$self->_print_info(); #test
+						$_->set_scaling_factor($scale_reset) for @{ $object->instances };
+						$object->center_around_origin;
+						
+						%hash_data = _model_info($self, $object);
+						
+						if (_check_size_model($bed_size, \%hash_data)) {
+							die("Reset parameters overloads platform with internal error");
+						}
+						
+						$object->center_around_origin;
+					}
+					
+					1;
+				};
+				
+				if ($@) {
+					print "ErrMsg: " . $@ . "\n";
+					_http_response_text($c, 433, $@);
+				} else {
+					my %hash_data = _model_info($self, $self->{model}->objects->[$model_id]);
+					
+					_http_response_text($c, 200, to_json(\%hash_data));
+				}
+				
+				$self->_print_info(); #test
+			} else {
+				_http_response_text($c, 433, 'Incorrect parameter');
+			}
+			
+		}
+	}
 }
 
 sub set_parameter {
@@ -649,7 +759,6 @@ sub set_parameter {
 }
 
 sub preview_model {
-	#TODO FIXME adapt me with 1.1.7
 	my ($self, $r, $c) = @_;
 	my $object_preview;
 	print "Request: preview_model\n";
@@ -664,7 +773,7 @@ sub preview_model {
 	}
 	
 	unless (defined($self->{model})) {
-		_http_response_text($c, 453, 'No model in system');
+		_http_response_text($c, 441, 'No model in system');
 		
 		return;
 	}
@@ -706,7 +815,7 @@ sub preview_model {
 		
 		$object_preview = Slic3r::Custom::Preview->new(
 			$object, $input_rho, $input_theta, $input_delta, $image_file,
-			HEIGHT_PLATFORM, $self->{config_slic3r}->bed_size,
+			$height_platform, $self->{config_slic3r}->bed_size,
 			$data_color1, $data_color2);
 		
 		1;
@@ -724,7 +833,7 @@ sub preview_model {
 			1;
 		};
 		if ($@) {
-			$object_preview->ReleaseRessource();
+			eval {$object_preview->ReleaseRessource(); 1;};
 			_http_response_text($c, 433, $@);
 		} else {
 			$object_preview->ReleaseRessource();
@@ -790,7 +899,6 @@ sub slice {
 
 #TODO FIXME this function will let the second call after halting failed and that will exit the slicer
 sub slice_halt {
-	#TODO FIXME adapt me with 1.1.7
 	my ($self, $r, $c) = @_;
 	print "Request: slice_halt\n";
 	
@@ -842,11 +950,58 @@ sub check_slice {
 	return;
 }
 
+sub export_amf {
+	my ($self, $r, $c) = @_;
+	print "Request: export_amf\n";
+	
+#	my $data = _load_JSON($self, FILE_STATUS);
+	unless (defined($self->{model}) && scalar @{$self->{model}->objects} > 0) {
+		_http_response_text($c, 441, 'Platform empty');
+	} else {
+		eval {
+			require Slic3r::Custom::AMF;
+			
+			my $input_color1 = $r->uri->query_param("color1") // undef;
+			my $input_color2 = $r->uri->query_param("color2") // undef;
+			my %extra_data = ();
+			my %model_data = _model_info($self, $self->{model}->objects->[0]);
+#			if (defined($input_color1)) {
+#				$extra_data{0}{color} = decode_json($input_color1);
+#			}
+#			else {
+#				$extra_data{0}{color} = undef;
+#			}
+#			if (defined($input_color2)) {
+#				$extra_data{1}{color} = decode_json($input_color2);
+#			}
+#			else {
+#				$extra_data{1}{color} = undef;
+#			}
+			$extra_data{0}{color} = $input_color1;
+			$extra_data{1}{color} = $input_color2;
+			
+			Slic3r::Custom::AMF->write_file($self->{config}->{http}{model} . OUTPUT_AMF, $self->{model}, $model_data{s}, \%extra_data);
+			
+			1;
+		};
+		if ($@) {
+			_http_response_text($c, 500, $@);
+		} else {
+			_http_response_text($c, 200, 'Ok' . "\n" . $self->{config}->{http}{model} . OUTPUT_AMF);
+		}
+	}
+	
+#	_save_status($self, "Done", $r->uri->as_string);
+	
+	return;
+}
+
 sub test_function {
 	my ($self, $r, $c) = @_;
 	print "Request: test_function\n";
 	
-	my $data = _load_JSON($self, FILE_STATUS);
+#	my $data = _load_JSON($self, FILE_STATUS);
+	_http_response_text($c, 200, 'Ok');
 	
 	return;
 }
@@ -879,8 +1034,9 @@ sub _model_info {
 	my ($xpos, $ypos, $xcen, $ycen, $xmax, $ymax);
 	my @array_color;
 	my %hash_data;
+	my $scale_max;
 	
-	{
+	{ # get color
 		foreach my $i (0..$#{$object->volumes}) {
 			my $volume = $object->volumes->[$i];
 			if (defined $volume->material_id) {
@@ -889,6 +1045,19 @@ sub _model_info {
 				push (@array_color, $config->extruder);
 			}
 		}
+	}
+	{ # get max scale (calculated by platform and model size, but not real situation)
+		my $bed_size = $self->{config_slic3r}->bed_size;
+		
+		for my $scale_axis ($bed_size->[X] / $size->[X],
+				$bed_size->[Y] / $size->[Y],
+				$height_platform / $size->[Z]) {
+			if (!defined($scale_max) || $scale_axis < $scale_max) {
+				$scale_max = $scale_axis;
+			}
+		};
+		
+		$scale_max *= $instance->scaling_factor;
 	}
 	
 #	$xcen = $self->{config_slic3r}->print_center->[X] + $instance->offset->[X];
@@ -917,24 +1086,54 @@ sub _model_info {
 			"zrot"	=> $instance->rotation,
 			"s"		=> $instance->scaling_factor * 100,
 			"color"	=> \@array_color,
+			"smax"	=> $scale_max * 100,
 	);
 	
 	return %hash_data;
 }
 
+sub _check_size_model {
+	my ($bed_size, $hash_data) = @_;
+	
+	if ($hash_data->{xpos} < 0 || $hash_data->{xmax} > $bed_size->[X]
+			|| $hash_data->{ypos} < 0 || $hash_data->{ymax} > $bed_size->[Y]
+			|| $hash_data->{zpos} < 0 || $hash_data->{zmax} > $height_platform
+	) {
+		return 1;
+	}
+	
+	return 0;
+}
+
+sub _check_size_total {
+#	my ($self, $object) = @_;
+	my $self = shift;
+	my %hash_data;
+	my $oversize = 0;
+	my $bed_size = $self->{config_slic3r}->bed_size;
+	
+	foreach my $object (@{$self->{model}->objects}) {
+		%hash_data = _model_info($self, $object);
+		
+		$oversize += _check_size_model($bed_size, \%hash_data);
+	}
+	
+	return $oversize;
+}
+
 sub _upload_model_info {
 	my ($self, $c, $model_size, $scale_max) = @_;
 	my %hash_return = (
-		"id"		=> 0,
-		"xsize"		=> $model_size->[X],
-		"ysize"		=> $model_size->[Y],
-		"zsize"		=> $model_size->[Z],
-		"scalemax"	=> $scale_max * 100,
+		"id"	=> 0,
+		"xsize"	=> $model_size->[X],
+		"ysize"	=> $model_size->[Y],
+		"zsize"	=> $model_size->[Z],
+		"smax"	=> $scale_max * 100,
 	);
 	
 	$self->_print_info(); #test
 	
-	_http_response_text($c, 200, to_json(\%hash_return));
+	_http_response_text($c, 202, to_json(\%hash_return));
 	
 	return;
 }
@@ -1136,5 +1335,97 @@ sub _load_JSON_path {
 		return undef;
 	}
 }
+
+#TEST - asynchronize adding file
+#sub add_file {
+#	my ($self, $r, $c) = @_;
+#	
+#	if (!$r->uri->query_param("file")) {
+#		_http_response_text($c, 432, 'Missing parameter');
+#	} else {
+#		#	if ($Slic3r::have_threads) 
+#		if ($self->{have_threads}) { #TO/DO better check if we are in slicing or not
+#			$self->{thread} = threads->create(\&_go_add, $self, $r->uri->query_param("file"), $r->uri->as_string);
+#		} else {
+#			_go_add($self, $r->uri->query_param("file"), $r->uri->as_string);
+#		}
+#		
+#		_http_response_text($c, 200, 'Ok');
+#	}
+#	
+#	return;
+#}
+
+#sub check_add {
+#	my ($self, $r, $c) = @_;
+#	
+#	unless( -e ($self->{config}->{http}{conf} . FILE_IN_ADD) ) {
+#		my $data = _load_JSON($self, FILE_STATUS);
+#		if (!defined($data)) {
+#			_http_response_text($c, 500, "cannot open status file");
+#		} elsif ($data->{Sate} eq "Error") {
+#			_http_response_text($c, 499, $data->{Message});
+#		} else {
+#			_http_response_text($c, 200, -1);
+#		}
+#	} else {
+#		my $data = _load_JSON($self, FILE_IN_ADD);
+#		if (!defined($data)) {
+#			_http_response_text($c, 500, "cannot open add file");
+#		} elsif ($data->{percent} == 100) {
+#			_http_response_text($c, 200, $data->{percent} . "\n" . $data->{message});
+#			unlink($self->{config}->{http}{conf} . FILE_IN_ADD);
+#			$self->{model} = $self->{thread}->join();
+#			$self->{thread} = undef;
+#		} else {
+#			_http_response_text($c, 200, $data->{percent});
+#		}
+#	}
+#	
+#	
+##	_save_status($self, "Done", $r->uri->as_string);
+#	
+#	return;
+#}
+
+#sub _go_add {
+#	my ($self, $input_file, $commandline) = @_;
+#
+#	if ($self->{have_threads}) {
+#		local $SIG{'KILL'} = sub {
+#			threads->exit();
+#		};
+#	}
+#	
+#	_save_percentage($self, FILE_IN_ADD, 0);
+#	
+#	eval {
+#		$self->{model} = Slic3r::Model->read_from_file($input_file);
+#		_save_percentage($self, FILE_IN_ADD, 80, "Finished read file");
+#		
+#		$_->scale($self->{config_slic3r}->scale) for @{$self->{model}->objects};
+#		_save_percentage($self, FILE_IN_ADD, 83, "Finished system scale");
+#		$self->{model}->set_material(0, {Name => basename($self->{model}->{objects}[0]->{input_file})});
+#		$self->{model}->{objects}->[0]->{volumes}->[0]->{material_id} = 0;
+#		$self->{model}->{objects}->[0]->{material_mapping} = {0 => 1};
+#		_save_percentage($self, FILE_IN_ADD, 85, "Finished setting material");
+#		$self->{model}->arrange_objects($self->{config_slic3r});
+#		_save_percentage($self, FILE_IN_ADD, 95, "Finished arrange");
+#		
+#		_print_info(); #test
+#	};
+#	if ($@) {
+#		unlink($self->{config}->{http}{conf} . FILE_IN_ADD);
+#		_save_status($self, "Error", $commandline, "AddError: " . $@);
+#	} else {
+#		_save_percentage($self, FILE_IN_ADD, 100, "AddDone");
+#		_save_status($self, "Done", $commandline);
+#	}
+#	
+#	$self->{thread} = undef;
+#	
+#	return $self->{model};
+#}
+#TEST end
 
 1;

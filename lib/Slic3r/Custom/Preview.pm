@@ -27,7 +27,7 @@ use constant COLORS => [ [0.5,0.5,0.5], [1,1,1] ];
 
 #DIY define some constant variable to let edit easier
 use constant CAP_IMG_LEN => 500;
-use constant RHO_DEFAULT => 400;
+use constant RHO_DEFAULT => 500;
 #DIY end - PNI
 
 # make OpenGL::Array thread-safe
@@ -286,6 +286,10 @@ sub Render {
         my $o_x = $center->x;
         my $o_y = $center->y;
 #		print "x: $o_x, y: $o_y\n";
+		my $axis_len_y_draw = $axis_len_y;
+		if ($self->psize->[Y] % 10) {
+			$axis_len_y_draw = $axis_len_y + 10 - ($self->psize->[Y] % 10);
+		}
         # TODO need to think about the value Z of O ($center->[Z] or 0)
         #DIY end - PNI
         glLineWidth(2);
@@ -297,7 +301,7 @@ sub Render {
         # draw line for y axis
         glColor3f(0, 1, 0);
         glVertex3f($o_x, $o_y, 0);
-        glVertex3f($o_x, $axis_len_y + $o_y, 0);
+        glVertex3f($o_x, $axis_len_y + $o_y, 0); # just draw the axis to the print limit
         # draw line for Z axis
         glColor3f(0, 0, 1);
         glVertex3f($o_x, $o_y, 0);
@@ -308,13 +312,13 @@ sub Render {
         my $ground_z = 0.5;
         glDisable(GL_CULL_FACE);
         glEnable(GL_BLEND);
-	     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glBegin(GL_QUADS);
         glColor4f(1, 1, 1, 0.5);
         glVertex3f(-$axis_len_x + $o_x, -$axis_len_y + $o_y, -$ground_z);
         glVertex3f($axis_len_x + $o_x, -$axis_len_y + $o_y, -$ground_z);
-        glVertex3f($axis_len_x + $o_x, $axis_len_y + $o_y, -$ground_z);
-        glVertex3f(-$axis_len_x + $o_x, $axis_len_y + $o_y, -$ground_z);
+        glVertex3f($axis_len_x + $o_x, $axis_len_y_draw + $o_y, -$ground_z);
+        glVertex3f(-$axis_len_x + $o_x, $axis_len_y_draw + $o_y, -$ground_z);
         glEnd();
         glEnable(GL_CULL_FACE);
         glDisable(GL_BLEND);
@@ -324,13 +328,25 @@ sub Render {
         glColor4f(1, 1, 1, 0.8);
         for (my $x = -$axis_len_x + $o_x; $x <= $axis_len_x + $o_x; $x += 10) {
             glVertex3f($x, -$axis_len_y + $o_y, 0);
-            glVertex3f($x, $axis_len_y + $o_y, 0);
+            glVertex3f($x, $axis_len_y_draw + $o_y, 0);
         }
-        for (my $y = -$axis_len_y + $o_y; $y <= $axis_len_y + $o_y; $y += 10) {
+        for (my $y = -$axis_len_y + $o_y; $y <= $axis_len_y_draw + $o_y; $y += 10) {
             glVertex3f(-$axis_len_x + $o_x, $y, 0);
             glVertex3f($axis_len_x + $o_x, $y, 0);
         }
         glEnd();
+		
+		#DIY draw rules
+		glColor4f(0.2, 0.2, 0.9, 0.7);
+		for (my $x = -$axis_len_x + $o_x; $x <= $axis_len_x + $o_x; $x += 50) {
+			glRasterPos2i($x - 5, -($axis_len_y + $o_y + 6));
+			ourPrintString(GLUT_BITMAP_HELVETICA_12, $x + ($axis_len_x - $o_x));
+		}
+		for (my $y = -$axis_len_y + $o_y + 50; $y <= $axis_len_y_draw + $o_y; $y += 50) {
+			glRasterPos2i(-($axis_len_x + $o_x + 10), $y - 2);
+			ourPrintString(GLUT_BITMAP_HELVETICA_12, $y + ($axis_len_y - $o_y));
+		}
+		#DIY end - PNI
     }
 
     glPopMatrix();
@@ -344,6 +360,24 @@ sub Render {
 		my ($fmt, $size) = $frame_capture->Get('gl_format', 'gl_type');
 		glReadPixels_c(0, 0, CAP_IMG_LEN, CAP_IMG_LEN, GL_RGBA, GL_UNSIGNED_BYTE, $frame_capture->Ptr());
 		$frame_capture->Save($self->simage);
+#		my $tmpimage = dirname($self->simage) . '/tmp.tga'; #store the temp file
+#		$frame_capture->Save($tmpimage);
+#		my $filename = $self->simage;
+#		{
+#			use Time::HiRes qw(sleep);
+#			my @args = ("convert", $tmpimage, $filename);
+#			for(my $i = 0; $i < 3; $i++) {
+#				if (0 == system(@args)) {
+#					last;
+#				}
+#				else {
+#					print "sleep 1s and retry...\n";
+#					sleep(1);
+#				}
+#			}
+#		}
+#		system("convert $tmpimage $filename");
+#		unlink($tmpimage); #delete the temp file
 	}
 	#DIY end - PNI
 
