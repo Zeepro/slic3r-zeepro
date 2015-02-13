@@ -26,8 +26,10 @@ use Slic3r::Geometry qw(X Y Z);
 use constant CONFIG_HTTP	=> "config_http.ini";
 
 use constant CONFIG_SLICER		=> "config.ini";
+use constant OUTPUT_RENDERAMF	=> "_slicer_preview.amf";
 use constant OUTPUT_GCODE		=> "_sliced_model.gcode";
 use constant OUTPUT_AMF			=> "_slicer_model.amf";
+use constant OUTPUT_STL			=> "_slicer_model.stl";
 #use constant OUTPUT_PREVIEW		=> "preview.png";
 use constant OUTPUT_PREVIEW		=> "preview.tga";
 use constant FILE_STATUS		=> "Slicer.json";
@@ -217,6 +219,10 @@ sub main_loop {
 #					Export AMF of model(s)
 					
 					export_amf($self, $r, $c);
+				} elsif ($r->uri->path eq "/export2slice") {
+#					Export STL or AMF of model(s) to slice at distance
+					
+					export_toSlice($self, $r, $c);
 				} elsif ($r->uri->path eq "/test") {
 #					Test method
 					
@@ -939,9 +945,10 @@ sub check_slice {
 			_http_response_text($c, 500, "cannot open percentage file");
 		} elsif ($data->{percent} == 100) {
 			_http_response_text($c, 200, $data->{percent} . "\n" . $data->{message});
+			chmod 0777, $self->{config}->{http}{model} . OUTPUT_GCODE;
 			unlink($self->{config}->{http}{conf} . FILE_PERCENTAGE);
 		} else {
-			_http_response_text($c, 200, $data->{percent});
+			_http_response_text($c, 200, $data->{percent} . "\n" . $data->{message});
 		}
 	}
 	
@@ -980,18 +987,66 @@ sub export_amf {
 			$extra_data{0}{color} = $input_color1;
 			$extra_data{1}{color} = $input_color2;
 			
-			Slic3r::Custom::AMF->write_file($self->{config}->{http}{model} . OUTPUT_AMF, $self->{model}, $model_data{s}, \%extra_data);
+			Slic3r::Custom::AMF->write_file($self->{config}->{http}{model} . OUTPUT_RENDERAMF, $self->{model}, $model_data{s}, \%extra_data);
 			
 			1;
 		};
 		if ($@) {
 			_http_response_text($c, 500, $@);
 		} else {
-			_http_response_text($c, 200, 'Ok' . "\n" . $self->{config}->{http}{model} . OUTPUT_AMF);
+			_http_response_text($c, 200, 'Ok' . "\n" . $self->{config}->{http}{model} . OUTPUT_RENDERAMF);
 		}
 	}
 	
 #	_save_status($self, "Done", $r->uri->as_string);
+	
+	return;
+}
+
+sub export_toSlice {
+	my ($self, $r, $c) = @_;
+	print "Request: export_toSlice\n";
+	
+	unless (defined($self->{model}) && scalar @{$self->{model}->objects} > 0) {
+		_http_response_text($c, 441, 'Platform empty');
+	} else {
+		my $number_material;
+		my $model_path;
+		my $config_path = $self->{config}->{http}{model} . CONFIG_SLICER;
+		
+		eval {
+			# clean old files
+			unlink($config_path);
+			unlink($self->{config}->{http}{model} . OUTPUT_STL);
+			unlink($self->{config}->{http}{model} . OUTPUT_AMF);
+			
+			# export config
+			$self->{config_slic3r}->save($config_path);
+			
+			# export model
+			$number_material = $self->{model}->objects->[0]->materials_count;
+			if ($number_material == 1) {
+				require Slic3r::Format::STL;
+				
+				$model_path = $self->{config}->{http}{model} . OUTPUT_STL;
+				Slic3r::Format::STL->write_file($model_path, $self->{model}, binary => 1);
+			}
+			else {
+				require Slic3r::Format::AMF;
+				
+				$model_path = $self->{config}->{http}{model} . OUTPUT_AMF;
+				Slic3r::Format::AMF->write_file($model_path, $self->{model});
+			}
+			chmod 0777, $model_path;
+			
+			1;
+		};
+		if ($@) {
+			_http_response_text($c, 500, $@);
+		} else {
+			_http_response_text($c, 200, 'Ok' . "\n" . $config_path . "\n" . $model_path);
+		}
+	}
 	
 	return;
 }
@@ -1148,7 +1203,7 @@ sub _go_slice {
 		};
 	}
 	
-	_save_percentage($self, FILE_PERCENTAGE, 0, "Initialization slicing");
+	_save_percentage($self, FILE_PERCENTAGE, 1, "Initialization slicing");
 	
 	my $print;
 	eval {
@@ -1179,6 +1234,7 @@ sub _go_slice {
 		});
 		$print->process;
 		$print->export_gcode(output_file => $self->{config}->{http}{model} . OUTPUT_GCODE);
+		chmod 0777, $self->{config}->{http}{model} . OUTPUT_GCODE;
 	};
 	if ($@) {
 		unlink($self->{config}->{http}{conf} . FILE_PERCENTAGE);

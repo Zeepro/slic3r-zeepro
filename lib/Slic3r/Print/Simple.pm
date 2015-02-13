@@ -6,9 +6,14 @@ use Slic3r::Geometry qw(X Y);
 has '_print' => (
     is      => 'ro',
     default => sub { Slic3r::Print->new },
-    handles => [qw(apply_config extruders expanded_output_filepath
-                    total_used_filament total_extruded_volume
-                    placeholder_parser)],
+	#DIY for remote slice service synchronization
+#    handles => [qw(apply_config extruders expanded_output_filepath
+#                    total_used_filament total_extruded_volume
+#                    placeholder_parser)],
+	handles => [qw(apply_config extruders expanded_output_filepath
+					total_used_filament total_extruded_volume
+					placeholder_parser info_used_filament)],
+	#DIY end - PNI
 );
 
 has 'duplicate' => (

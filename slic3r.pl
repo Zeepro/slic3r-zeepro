@@ -174,7 +174,10 @@ if (@ARGV) {  # slicing from command line
             duplicate_grid  => $opt{duplicate_grid} // [1,1],
             status_cb       => sub {
                 my ($percent, $message) = @_;
-                printf "=> %s\n", $message;
+				#DIY for remote slice service synchronization
+#                printf "=> %s\n", $message;
+				printf "%d=%s\n", $percent, $message;
+				#DIY end - PNI
             },
             output_file     => $opt{output},
         );
@@ -196,6 +199,9 @@ if (@ARGV) {  # slicing from command line
             }
             printf "Filament required: %.1fmm (%.1fcm3)\n",
                 $sprint->total_used_filament, $sprint->total_extruded_volume/1000;
+			#DIY for remote slice service synchronization
+			printf "Filament info=%s\n", $sprint->info_used_filament;
+			#DIY end - PNI
         }
     }
 } else {
