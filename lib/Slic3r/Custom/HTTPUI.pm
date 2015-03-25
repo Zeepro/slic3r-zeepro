@@ -27,6 +27,7 @@ use constant CONFIG_HTTP	=> "config_http.ini";
 
 use constant CONFIG_SLICER		=> "config.ini";
 use constant OUTPUT_RENDERAMF	=> "_slicer_preview.amf";
+use constant OUTPUT_RENDERSTL	=> "_slicer_preview.stl";
 use constant OUTPUT_GCODE		=> "_sliced_model.gcode";
 use constant OUTPUT_AMF			=> "_slicer_model.amf";
 use constant OUTPUT_STL			=> "_slicer_model.stl";
@@ -215,10 +216,10 @@ sub main_loop {
 #					Check all model sizes
 					
 					check_sizes($self, $r, $c);
-				} elsif ($r->uri->path eq "/exportamf") {
+				} elsif ($r->uri->path eq "/export2render") {
 #					Export AMF of model(s)
 					
-					export_amf($self, $r, $c);
+					export_toRender($self, $r, $c);
 				} elsif ($r->uri->path eq "/export2slice") {
 #					Export STL or AMF of model(s) to slice at distance
 					
@@ -230,7 +231,7 @@ sub main_loop {
 				} else {
 #					Splash screen...
 					
-					_http_response_text($c, 200, 'Slic3r 1.1.7 - HTTP daemon Zeepro mod');
+					_http_response_text($c, 200, 'Slic3r 1.1.7b20150323 - HTTP daemon Zeepro mod');
 				}
 			} elsif ($r->method eq 'POST') {
 				if ($r->uri->path eq "/loadmodel") {
@@ -957,7 +958,7 @@ sub check_slice {
 	return;
 }
 
-sub export_amf {
+sub export_toRender {
 	my ($self, $r, $c) = @_;
 	print "Request: export_amf\n";
 	
@@ -965,36 +966,41 @@ sub export_amf {
 	unless (defined($self->{model}) && scalar @{$self->{model}->objects} > 0) {
 		_http_response_text($c, 441, 'Platform empty');
 	} else {
+		my $model_path;
+		
 		eval {
-			require Slic3r::Custom::AMF;
+			my $number_material;
 			
-			my $input_color1 = $r->uri->query_param("color1") // undef;
-			my $input_color2 = $r->uri->query_param("color2") // undef;
-			my %extra_data = ();
-			my %model_data = _model_info($self, $self->{model}->objects->[0]);
-#			if (defined($input_color1)) {
-#				$extra_data{0}{color} = decode_json($input_color1);
-#			}
-#			else {
-#				$extra_data{0}{color} = undef;
-#			}
-#			if (defined($input_color2)) {
-#				$extra_data{1}{color} = decode_json($input_color2);
-#			}
-#			else {
-#				$extra_data{1}{color} = undef;
-#			}
-			$extra_data{0}{color} = $input_color1;
-			$extra_data{1}{color} = $input_color2;
+			$number_material = $self->{model}->objects->[0]->materials_count;
 			
-			Slic3r::Custom::AMF->write_file($self->{config}->{http}{model} . OUTPUT_RENDERAMF, $self->{model}, $model_data{s}, \%extra_data);
+			if ($number_material == 1) {
+				require Slic3r::Format::STL;
+				
+				$model_path = $self->{config}->{http}{model} . OUTPUT_RENDERSTL;
+				Slic3r::Format::STL->write_file($model_path, $self->{model}->objects->[0]->raw_mesh, binary => 1);
+			}
+			else {
+				require Slic3r::Custom::AMF;
+				
+				my $input_color1 = $r->uri->query_param("color1") // undef;
+				my $input_color2 = $r->uri->query_param("color2") // undef;
+				my %extra_data = ();
+				my %model_data = _model_info($self, $self->{model}->objects->[0]);
+				
+				$extra_data{0}{color} = $input_color1;
+				$extra_data{1}{color} = $input_color2;
+				$model_path = $self->{config}->{http}{model} . OUTPUT_RENDERAMF;
+				
+				Slic3r::Custom::AMF->write_file($model_path, $self->{model}, $model_data{s}, \%extra_data);
+			}
+			chmod 0777, $model_path;
 			
 			1;
 		};
 		if ($@) {
 			_http_response_text($c, 500, $@);
 		} else {
-			_http_response_text($c, 200, 'Ok' . "\n" . $self->{config}->{http}{model} . OUTPUT_RENDERAMF);
+			_http_response_text($c, 200, 'Ok' . "\n" . $model_path);
 		}
 	}
 	
