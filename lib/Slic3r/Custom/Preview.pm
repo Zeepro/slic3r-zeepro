@@ -76,7 +76,7 @@ sub load_object {
 	my $instance = $object->instances->[0];
 	my $xrot = $instance->rotationX;
 	my $yrot = $instance->rotationY;
-	my $zrot = $instance->rotation + 180;
+	my $zrot = $instance->rotation;
 	my $scale = $instance->scaling_factor;
 
     my $bb = $object->mesh->bounding_box;
