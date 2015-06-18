@@ -212,6 +212,10 @@ sub main_loop {
 #					Set temporary parameters
 					
 					set_parameter($self, $r, $c);
+				} elsif ($r->uri->path eq "/getparameter") {
+#					Get current parameters
+					
+					get_parameter($self, $r, $c);
 				} elsif ($r->uri->path eq "/checksizes") {
 #					Check all model sizes
 					
@@ -721,6 +725,32 @@ sub reset_model {
 	}
 }
 
+sub get_parameter {
+	my ($self, $r, $c) = @_;
+	print "Request: get_parameter\n";
+	
+	unless (defined($r->uri->query_param("p"))) {
+		_http_response_text($c, 432, 'Missing parameter');
+	}
+	else {
+		my $param_key = $r->uri->query_param("p");
+		my $param_value = $self->{config_slic3r}->serialize($param_key) // undef; # get($param_key)
+		
+#		if (ref($param_value) eq "ARRAY") {
+#			$param_value = $self->{config_slic3r}->serialize($param_key) // undef;
+#		}
+		if (defined($param_value)) {
+			print $param_key . " = " . $param_value . "\n";
+			_http_response_text($c, 200, $param_value);
+		}
+		else {
+			_http_response_text($c, 433, 'Incorrect parameter');
+		}
+	}
+	
+	return;
+}
+
 sub set_parameter {
 	my ($self, $r, $c) = @_;
 	print "Request: set_parameter\n";
@@ -730,7 +760,8 @@ sub set_parameter {
 	 || defined($r->uri->query_param("fill_density"))
 	 || defined($r->uri->query_param("skirts"))
 	 || defined($r->uri->query_param("raft_layers"))
-	 || defined($r->uri->query_param("support_material"))) {
+	 || defined($r->uri->query_param("support_material"))
+	 || defined($r->uri->query_param("bed_temperature"))) {
 		_http_response_text($c, 432, 'Missing parameter');
 	}
 	else {
@@ -757,6 +788,12 @@ sub set_parameter {
 		if (defined($r->uri->query_param("first_layer_temperature"))) {
 			$self->{config_slic3r}->set_deserialize("first_layer_temperature", $r->uri->query_param("first_layer_temperature"));
 			print "set first_layer_temperature " . $self->{config_slic3r}->serialize("first_layer_temperature") . "\n";
+		}
+		if (defined($r->uri->query_param("bed_temperature"))) {
+			my $set_value = $r->uri->query_param("bed_temperature");
+			$self->{config_slic3r}->set("bed_temperature", $set_value);
+			$self->{config_slic3r}->set("first_layer_bed_temperature", $set_value);
+			print "set bed_temperature + first_layer_bed_temperature " . $self->{config_slic3r}->get("bed_temperature") . "\n";
 		}
 		
 		_http_response_text($c, 200, 'Ok');

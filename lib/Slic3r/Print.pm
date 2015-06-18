@@ -886,9 +886,19 @@ sub write_gcode {
     print $fh $gcodegen->set_fan(0, 1) if $self->config->cooling && $self->config->disable_fan_first_layers;
     
     # set bed temperature
-    if ((my $temp = $self->config->first_layer_bed_temperature) && $self->config->start_gcode !~ /M(?:190|140)/i) {
-        printf $fh $gcodegen->set_bed_temperature($temp, 1);
-    }
+	#DIY heat bed and extruder in the same time
+#    if ((my $temp = $self->config->first_layer_bed_temperature) && $self->config->start_gcode !~ /M(?:190|140)/i) {
+#        printf $fh $gcodegen->set_bed_temperature($temp, 1);
+#    }
+	my $print_first_layer_bed_temperature = sub {
+		my ($wait) = @_;
+		
+		if ((my $temp = $self->config->first_layer_bed_temperature) && $self->config->start_gcode !~ /M(?:190|140)/i) {
+			printf $fh $gcodegen->set_bed_temperature($temp, $wait);
+		}
+	};
+	$print_first_layer_bed_temperature->(0);
+	#DIY end - PNI
     
     # set extruder(s) temperature before and after start G-code
     my $print_first_layer_temperature = sub {
@@ -903,6 +913,9 @@ sub write_gcode {
     };
     $print_first_layer_temperature->(0);
     printf $fh "%s\n", $gcodegen->placeholder_parser->process($self->config->start_gcode);
+	#DIY heat bed and extruder in the same time
+	$print_first_layer_bed_temperature->(1);
+	#DIY end - PNI
     $print_first_layer_temperature->(1);
     
     # set other general things
